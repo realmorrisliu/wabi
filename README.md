@@ -15,9 +15,8 @@ A `subagent` tool for pi that delegates tasks to specialized agents, each runnin
 | agent | model | role |
 |---|---|---|
 | `worker` | deepseek-v4-flash | executor — implements tasks directly (full file access) |
+| `creative-worker` | kimi-k3 | creative executor — web pages, 3D games, visual builds (full file access) |
 | `reviewer` | gpt-5.6-sol | two passes: correctness + ponytail-review complexity (read-only) |
-
-> reviewer's model requires the codex provider. Until you add it, override per call: `subagent { agent: "reviewer", model: "qwen3.8-max", ... }`.
 
 Change any agent's model/tools by editing its markdown frontmatter. No code changes needed.
 
@@ -28,6 +27,8 @@ The main model calls the `subagent` tool with one of three modes:
 - `{ agent: "reviewer", task: "review src/index.ts" }` — single
 - `{ tasks: [{agent, task}, ...] }` — parallel (one tmux window each)
 - `{ chain: [{agent: "worker", task: "..."}, {agent: "reviewer", task: "... review {previous}"}] }` — sequential, `{previous}` passes the prior step's output
+
+For creative builds, chain `creative-worker` (build) → `reviewer` (check).
 
 Optional overrides: `model`, `thinking`, `cwd`.
 

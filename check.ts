@@ -68,8 +68,9 @@ check("parseFrontmatter: body without frontmatter", parseFrontmatter("no fm").bo
 const repoRoot = new URL(".", import.meta.url).pathname;
 const agents = discoverAgents(`${repoRoot}agents`);
 const names = agents.map((a) => a.name).sort();
-check("discoverAgents: finds the 2 real agents", names.join(",") === "reviewer,worker");
+check("discoverAgents: finds the 3 real agents", names.join(",") === "creative-worker,reviewer,worker");
 check("discoverAgents: worker uses cheap model + full tools", agents.find((a: AgentConfig) => a.name === "worker")?.model === "deepseek-v4-flash");
+check("discoverAgents: creative-worker uses kimi-k3", agents.find((a: AgentConfig) => a.name === "creative-worker")?.model === "kimi-k3");
 check("discoverAgents: reviewer uses the strong model", agents.find((a: AgentConfig) => a.name === "reviewer")?.model === "gpt-5.6-sol");
 
 if (failures > 0) {
