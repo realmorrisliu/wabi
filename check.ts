@@ -68,9 +68,9 @@ check("parseFrontmatter: body without frontmatter", parseFrontmatter("no fm").bo
 const repoRoot = new URL(".", import.meta.url).pathname;
 const agents = discoverAgents(`${repoRoot}agents`);
 const names = agents.map((a) => a.name).sort();
-check("discoverAgents: finds the 3 real agents", names.join(",") === "planner,reviewer,scout");
-check("discoverAgents: scout has cheap model + tools", agents.find((a: AgentConfig) => a.name === "scout")?.model === "deepseek-v4-flash");
-check("discoverAgents: planner/reviewer use strong model", agents.every((a: AgentConfig) => a.name === "scout" || a.model === "qwen3.8-max"));
+check("discoverAgents: finds the 2 real agents", names.join(",") === "reviewer,worker");
+check("discoverAgents: worker uses cheap model + full tools", agents.find((a: AgentConfig) => a.name === "worker")?.model === "deepseek-v4-flash");
+check("discoverAgents: reviewer uses the strong model", agents.find((a: AgentConfig) => a.name === "reviewer")?.model === "gpt-5.6-sol");
 
 if (failures > 0) {
 	console.error(`\n${failures} check(s) FAILED`);

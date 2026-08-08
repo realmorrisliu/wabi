@@ -8,15 +8,16 @@ A `subagent` tool for pi that delegates tasks to specialized agents, each runnin
 
 - Watch or interrupt any run: `tmux attach -t wabi-sub`
 - Results are captured from JSONL output and returned to the main session with model + cost
-- Recursion-blocked, read-only agents, no hidden background processes
+- Recursion-blocked, no hidden background processes
 
 ## Agents (`~/.pi/agent/agents/`)
 
 | agent | model | role |
 |---|---|---|
-| `scout` | deepseek-v4-flash | fast codebase recon → compressed findings |
-| `planner` | qwen3.8-max | implementation plan (grills for clarifications when fuzzy, ponytail-minimal when clear) |
-| `reviewer` | qwen3.8-max | two passes: correctness + ponytail-review complexity |
+| `worker` | deepseek-v4-flash | executor — implements tasks directly (full file access) |
+| `reviewer` | gpt-5.6-sol | two passes: correctness + ponytail-review complexity (read-only) |
+
+> reviewer's model requires the codex provider. Until you add it, override per call: `subagent { agent: "reviewer", model: "qwen3.8-max", ... }`.
 
 Change any agent's model/tools by editing its markdown frontmatter. No code changes needed.
 
@@ -26,11 +27,11 @@ The main model calls the `subagent` tool with one of three modes:
 
 - `{ agent: "reviewer", task: "review src/index.ts" }` — single
 - `{ tasks: [{agent, task}, ...] }` — parallel (one tmux window each)
-- `{ chain: [{agent: "scout", task: "..."}, {agent: "planner", task: "... based on {previous}"}] }` — sequential, `{previous}` passes the prior step's output
+- `{ chain: [{agent: "worker", task: "..."}, {agent: "reviewer", task: "... review {previous}"}] }` — sequential, `{previous}` passes the prior step's output
 
 Optional overrides: `model`, `thinking`, `cwd`.
 
-Workflow prompt: `/scout-and-plan` runs scout → planner as a chain.
+Workflow prompt: `/implement-and-review` runs worker → reviewer as a chain.
 
 ## Install
 

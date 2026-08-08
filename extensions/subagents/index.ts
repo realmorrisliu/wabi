@@ -40,8 +40,9 @@ function ensureSession(firstWindow: string, firstCommand: string, cwd: string): 
 	spawnSync("tmux", ["new-session", "-d", "-s", SESSION, "-n", firstWindow, "-c", cwd, firstCommand]);
 }
 
-function newWindow(name: string, command: string, cwd: string): void {
-	spawnSync("tmux", ["new-window", "-t", SESSION, "-n", name, "-c", cwd, command]);
+function newWindow(name: string, command: string, cwd: string): boolean {
+	const r = spawnSync("tmux", ["new-window", "-t", SESSION, "-n", name, "-c", cwd, command]);
+	return r.status === 0;
 }
 
 /** Wait until the pane is dead (command exited) or the window/session is gone. */
@@ -126,7 +127,7 @@ export default function (pi: ExtensionAPI) {
 			"Delegate tasks to specialized subagents with isolated context, each running as a visible pi instance in a detached tmux session (wabi-sub).",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
 			`Agents are discovered from ${join(getAgentDir(), "agents")} (*.md with name/description/tools/model frontmatter).`,
-			"Watch or interact with any run via: tmux attach -t wabi-sub",
+			"Watch or interrupt any run via: tmux attach -t wabi-sub",
 		].join(" "),
 		parameters: SubagentParams,
 
@@ -167,8 +168,10 @@ export default function (pi: ExtensionAPI) {
 				if (!sessionCreated) {
 					ensureSession(name, command, cwd);
 					sessionCreated = true;
-				} else {
-					newWindow(name, command, cwd);
+				} else if (!newWindow(name, command, cwd)) {
+					// Session died (e.g. its last window closed after the previous step's
+					// pane exited). Recreate it with this window as the first one.
+					ensureSession(name, command, cwd);
 				}
 			};
 
