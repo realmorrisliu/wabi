@@ -1,6 +1,7 @@
-// lib.ts — pure logic for the wabi subagent extension (no side effects, unit-checked in check.ts)
+// Pure helpers for the wabi subagent extension. Checked by check.ts.
 
 import { readdirSync, readFileSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 
 export interface AgentConfig {
 	name: string;
@@ -10,94 +11,103 @@ export interface AgentConfig {
 	systemPrompt: string;
 }
 
-export interface ParsedResult {
-	text: string;
-	model?: string;
-	usage?: { input?: number; output?: number; cost?: number };
+export interface DecodedJsonl {
+	events: Record<string, any>[];
+	errors: string[];
 }
 
-/** Extract the final assistant text (plus model/usage) from `pi --mode json` JSONL output. */
-export function lastAssistantText(jsonl: string): ParsedResult {
-	let text = "";
-	let model: string | undefined;
-	let usage: ParsedResult["usage"];
-	for (const line of jsonl.split("\n")) {
+/** Incrementally decode LF-delimited JSON, including chunks split mid-line. */
+export class JsonlDecoder {
+	private buffer = "";
+	private readonly decoder = new StringDecoder("utf8");
+
+	push(chunk: string | Buffer): DecodedJsonl {
+		this.buffer += typeof chunk === "string" ? chunk : this.decoder.write(chunk);
+		const lines = this.buffer.split("\n");
+		this.buffer = lines.pop() ?? "";
+		return decodeLines(lines);
+	}
+
+	flush(): DecodedJsonl {
+		this.buffer += this.decoder.end();
+		const line = this.buffer;
+		this.buffer = "";
+		return decodeLines(line ? [line] : []);
+	}
+}
+
+function decodeLines(lines: string[]): DecodedJsonl {
+	const events: Record<string, any>[] = [];
+	const errors: string[] = [];
+	for (const line of lines) {
 		if (!line.trim()) continue;
-		let ev: any;
 		try {
-			ev = JSON.parse(line);
+			const value = JSON.parse(line);
+			if (value && typeof value === "object") events.push(value);
 		} catch {
-			continue;
-		}
-		const msg = ev?.message;
-		if (!msg || msg.role !== "assistant") continue;
-		const parts = (msg.content ?? [])
-			.filter((p: any) => p?.type === "text" && p.text)
-			.map((p: any) => p.text);
-		if (parts.length === 0) continue; // message_start / delta events carry no full text
-		text = parts.join("");
-		if (msg.model) model = msg.model;
-		if (msg.usage) {
-			usage = {
-				input: msg.usage.input,
-				output: msg.usage.output,
-				cost: msg.usage.cost?.total ?? msg.usage.cost,
-			};
+			errors.push(line);
 		}
 	}
-	return { text, model, usage };
+	return { events, errors };
 }
 
-/** Replace every {previous} placeholder with the given context (empty string when absent). */
-export function replacePrevious(template: string, previous: string | undefined): string {
-	if (!template.includes("{previous}")) return template;
-	return template.split("{previous}").join(previous ?? "");
+/** Keep model-visible handoffs bounded without splitting UTF-8 characters. */
+export function truncateUtf8(text: string, maxBytes: number): string {
+	const bytes = Buffer.from(text);
+	if (bytes.length <= maxBytes) return text;
+	const suffix = "\n\n[Output truncated; full transcript is available in /subagents.]";
+	const limit = Math.max(0, maxBytes - Buffer.byteLength(suffix));
+	let body = bytes.subarray(0, limit).toString("utf8");
+	while (body.endsWith("�")) body = body.slice(0, -1);
+	return body + suffix;
 }
 
-/** Quote a string for safe inclusion in a POSIX shell command line. */
-export function shellQuote(s: string): string {
-	return "'" + s.replace(/'/g, `'\\''`) + "'";
+export function formatDuration(ms: number): string {
+	const seconds = Math.max(0, Math.floor(ms / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	return seconds < 3600 ? `${minutes}m${seconds % 60}s` : `${Math.floor(minutes / 60)}h${minutes % 60}m`;
 }
 
-export interface TmuxCommandConfig {
-	command: string[]; // argv of the command to run inside the pane
-	outFile: string; // stdout/stderr redirected here
-	env?: Record<string, string>; // extra env vars, prefixed as VAR=val
+export function isWriter(agent: AgentConfig): boolean {
+	return !agent.tools || agent.tools.some((tool) => tool === "edit" || tool === "write");
 }
 
-/** Build the shell command string for one tmux window. */
-export function buildTmuxCommand(cfg: TmuxCommandConfig): string {
-	const envPrefix = cfg.env ? Object.entries(cfg.env).map(([k, v]) => `${k}=${shellQuote(v)} `).join("") : "";
-	const argv = cfg.command.map(shellQuote).join(" ");
-	return `${envPrefix}${argv} > ${shellQuote(cfg.outFile)} 2>&1`;
+export function contentText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((part) => part && typeof part === "object" && (part as any).type === "text")
+		.map((part) => String((part as any).text ?? ""))
+		.join("\n");
 }
 
-/** Parse frontmatter (--- yaml ---) + body from a markdown agent file. */
+/** Parse the deliberately flat frontmatter used by agent definitions. */
 export function parseFrontmatter(content: string): { frontmatter: Record<string, string>; body: string } {
 	const frontmatter: Record<string, string> = {};
-	const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-	if (!m) return { frontmatter, body: content.trim() };
-	for (const line of m[1].split("\n")) {
-		const kv = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
-		if (kv) frontmatter[kv[1]] = kv[2].trim();
+	const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+	if (!match) return { frontmatter, body: content.trim() };
+	for (const line of match[1].split("\n")) {
+		const field = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+		if (field) frontmatter[field[1]] = field[2].trim();
 	}
-	return { frontmatter, body: m[2].trim() };
+	return { frontmatter, body: match[2].trim() };
 }
 
-/** Load agent definitions from a directory of markdown files. */
 export function discoverAgents(dir: string): AgentConfig[] {
-	const agents: AgentConfig[] = [];
 	let entries: string[];
 	try {
 		entries = readdirSync(dir);
 	} catch {
-		return agents;
+		return [];
 	}
+
+	const agents: AgentConfig[] = [];
 	for (const entry of entries) {
 		if (!entry.endsWith(".md")) continue;
 		let content: string;
 		try {
-			content = readFileSync(`${dir}/${entry}`, "utf-8");
+			content = readFileSync(`${dir}/${entry}`, "utf8");
 		} catch {
 			continue;
 		}
@@ -106,7 +116,7 @@ export function discoverAgents(dir: string): AgentConfig[] {
 		agents.push({
 			name: frontmatter.name,
 			description: frontmatter.description ?? "",
-			tools: frontmatter.tools?.split(",").map((t) => t.trim()).filter(Boolean),
+			tools: frontmatter.tools?.split(",").map((tool) => tool.trim()).filter(Boolean),
 			model: frontmatter.model || undefined,
 			systemPrompt: body,
 		});

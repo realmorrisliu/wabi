@@ -13,8 +13,8 @@ for f in prompts/*.md; do
 	ln -sf "$PWD/$f" ~/.pi/agent/prompts/"$(basename "$f")"
 done
 
-# stale combined prompt and symlinks from the scout/planner era
-rm -f ~/.pi/agent/prompts/implement-and-review.md
+# stale prompts and symlinks from earlier versions
+rm -f ~/.pi/agent/prompts/implement-and-review.md ~/.pi/agent/prompts/implement.md
 rm -f ~/.pi/agent/agents/scout.md ~/.pi/agent/agents/planner.md ~/.pi/agent/prompts/scout-and-plan.md
 
 echo "wabi installed. Run /reload in pi to load the extension."

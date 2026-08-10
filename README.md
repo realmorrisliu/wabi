@@ -1,14 +1,18 @@
 # wabi
 
-Personal pi extension pack — subagents with tmux visibility, following 大道至简.
+Personal pi extension pack — small, observable subagents following 大道至简.
 
 ## What it is
 
-A `subagent` tool for pi that delegates tasks to specialized agents, each running as a **visible `pi` instance in a detached tmux session** (`wabi-sub`) — the way the pi author practices it ("Spawn pi instances via tmux. Full observability, direct interaction."):
+Wabi adds one `subagent` tool. Each task runs in an isolated, one-shot `pi --mode json` child process while the parent keeps the useful parts visible:
 
-- Watch or interrupt any run: `tmux attach -t wabi-sub`
-- Results are captured from JSONL output and returned to the main session with model + cost
-- Recursion-blocked, no hidden background processes
+- Foreground runs stream progress into pi
+- Background runs return immediately, then hand their final answer back as a follow-up
+- A compact widget shows agent, status, current tool, and elapsed time
+- `/subagents` or `Alt+S` opens the live transcript inspector; `s` stops a running child
+- Child process noise stays out of the parent model context; only the final answer is handed back
+
+Children inherit project context and skills, but not ambient extensions, prompt templates, or themes. They are stopped when the parent session reloads, switches, or exits.
 
 ## Agents (`~/.pi/agent/agents/`)
 
@@ -16,31 +20,51 @@ A `subagent` tool for pi that delegates tasks to specialized agents, each runnin
 |---|---|---|
 | `worker` | deepseek-v4-flash | executor — implements tasks directly (full file access) |
 | `creative-worker` | kimi-k3 | creative executor — web pages, 3D games, visual builds (full file access) |
-| `reviewer` | gpt-5.6-sol | two passes: correctness + ponytail-review complexity (read-only) |
+| `reviewer` | gpt-5.6-sol | correctness + ponytail-review complexity pass (read-only by policy) |
 
-Change any agent's model/tools by editing its markdown frontmatter. No code changes needed.
+Change an agent's model, tools, or instructions in its Markdown frontmatter. Per-call overrides are intentionally unsupported so runs stay reproducible.
 
 ## Usage
 
-The main model calls the `subagent` tool with one of three modes:
+The parent model calls one primitive:
 
-- `{ agent: "reviewer", task: "review src/index.ts" }` — single
-- `{ tasks: [{agent, task}, ...] }` — parallel (one tmux window each)
-- `{ chain: [{agent: "worker", task: "..."}, {agent: "reviewer", task: "... review {previous}"}] }` — sequential, `{previous}` passes the prior step's output
+```ts
+subagent({ agent: "reviewer", task: "review src/index.ts" })
+subagent({ agent: "worker", task: "fix issue #12", background: true })
+```
 
-For creative builds, chain `creative-worker` (build) → `reviewer` (check).
+Use multiple tool calls for parallel read-only work. Wabi permits at most four concurrent children and rejects a second write-capable child while one is active. Sequential composition happens naturally as each result is handed back to the parent.
 
-Optional overrides: `model`, `thinking`, `cwd`.
+Workflow prompts:
 
-Workflow prompts: `/implement` delegates to `worker`; `/review` delegates to `reviewer` and defaults to the current working tree. Invoke both in sequence when needed.
+```text
+/work [--background] <task>
+/review [--background] [scope]
+```
+
+`/review` defaults to the current working tree. For creative builds, ask the parent to delegate to `creative-worker`.
+
+## Inspector
+
+Open with `/subagents` or `Alt+S`.
+
+- `↑` / `↓`: select a run
+- `PgUp` / `PgDn`: scroll transcript
+- `Ctrl+T`: show or hide thinking
+- `s`, then `y`: stop a running child
+- `Esc`: close
+
+Completed runs remain inspectable for the current parent session; their widget row disappears after five seconds. Final handoffs are capped at 50 KB, while the inspector retains the session transcript.
 
 ## Install
 
 ```bash
-./install.sh   # symlinks extension + agents + prompt into ~/.pi/agent/, then /reload in pi
+./install.sh   # symlinks extension, agents, and prompts into ~/.pi/agent/
 ```
 
-When stable, install as a package: `pi install git:github.com/realmorrisliu/wabi` (this repo follows pi package conventions: `extensions/`, `prompts/`).
+Run `/reload` in pi after installing.
+
+When stable, install as a package with `pi install git:github.com/realmorrisliu/wabi`.
 
 ## Self-check
 

@@ -1,58 +1,58 @@
 // check.ts — self-check for wabi's pure logic. Run: bun check.ts
 
-import { readFileSync } from "node:fs";
 import {
-	AgentConfig,
-	buildTmuxCommand,
+	type AgentConfig,
+	JsonlDecoder,
+	contentText,
 	discoverAgents,
-	lastAssistantText,
+	formatDuration,
+	isWriter,
 	parseFrontmatter,
-	replacePrevious,
-	shellQuote,
+	truncateUtf8,
 } from "./extensions/subagents/lib.ts";
 
 let failures = 0;
-function check(name: string, cond: boolean) {
-	if (cond) {
-		console.log(`ok   ${name}`);
-	} else {
+function check(name: string, condition: boolean) {
+	if (condition) console.log(`ok   ${name}`);
+	else {
 		failures++;
 		console.log(`FAIL ${name}`);
 	}
 }
 
-// --- lastAssistantText: parses pi --mode json JSONL, returns final assistant text ---
-const jsonl = [
-	JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "hi" }] } }),
-	JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }], model: "deepseek-v4-flash" } }),
-	JSON.stringify({ type: "toolCall", message: { role: "assistant", content: [{ type: "toolCall", name: "bash" }] } }),
-	JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "final" }, { type: "text", text: " answer" }], model: "qwen3.8-max", usage: { input: 10, output: 20, cost: { total: 0.001 } } } }),
-	JSON.stringify({ type: "turn_end", message: { role: "assistant", content: [{ type: "thinking", thinking: "x" }, { type: "text", text: "the real final" }], model: "qwen3.8-max", usage: { input: 10, output: 20, cost: { total: 0.002 } } } }),
-].join("\n");
-const r = lastAssistantText(jsonl);
-check("lastAssistantText: takes the final text event (message_end/turn_end), not delta/toolcall events", r.text === "the real final");
-check("lastAssistantText: captures model", r.model === "qwen3.8-max");
-check("lastAssistantText: captures usage cost of the final event", r.usage?.cost === 0.002);
-check("lastAssistantText: empty input", lastAssistantText("").text === "");
+// Incremental JSONL parsing survives arbitrary chunk boundaries.
+const decoder = new JsonlDecoder();
+let decoded = decoder.push('{"type":"one"}\n{"type":"two"');
+check("JsonlDecoder: emits complete lines", decoded.events.length === 1 && decoded.events[0].type === "one");
+decoded = decoder.push('}\nbroken\n{"type":"three"}');
+check("JsonlDecoder: joins split lines", decoded.events.length === 1 && decoded.events[0].type === "two");
+check("JsonlDecoder: reports malformed lines", decoded.errors.length === 1 && decoded.errors[0] === "broken");
+decoded = decoder.flush();
+check("JsonlDecoder: flushes final unterminated line", decoded.events.length === 1 && decoded.events[0].type === "three");
+const unicodeDecoder = new JsonlDecoder();
+const unicodeLine = Buffer.from('{"text":"你好"}\n');
+const splitAt = unicodeLine.indexOf(Buffer.from("好")) + 1;
+unicodeDecoder.push(unicodeLine.subarray(0, splitAt));
+decoded = unicodeDecoder.push(unicodeLine.subarray(splitAt));
+check("JsonlDecoder: preserves split UTF-8 characters", decoded.events[0]?.text === "你好");
 
-// --- replacePrevious ---
-check("replacePrevious: substitutes all placeholders", replacePrevious("do A {previous} then {previous}", "X") === "do A X then X");
-check("replacePrevious: no placeholder passes through", replacePrevious("plain", "X") === "plain");
-check("replacePrevious: missing previous becomes empty", replacePrevious("a {previous} b", undefined) === "a  b");
+const truncated = truncateUtf8("你".repeat(100), 100);
+check("truncateUtf8: respects byte cap", Buffer.byteLength(truncated) <= 100);
+check("truncateUtf8: does not split UTF-8", !truncated.includes("�"));
+check("truncateUtf8: leaves short text unchanged", truncateUtf8("short", 100) === "short");
 
-// --- shellQuote ---
-check("shellQuote: wraps in single quotes", shellQuote("hello") === "'hello'");
-check("shellQuote: escapes embedded quotes", shellQuote("it's a 'test'") === `'it'\\''s a '\\''test'\\'''`);
+check("formatDuration: seconds", formatDuration(12_900) === "12s");
+check("formatDuration: minutes", formatDuration(125_000) === "2m5s");
+check("formatDuration: hours", formatDuration(7_260_000) === "2h1m");
+check("contentText: extracts text blocks", contentText([{ type: "text", text: "a" }, { type: "image" }, { type: "text", text: "b" }]) === "a\nb");
 
-// --- buildTmuxCommand ---
-const cmd = buildTmuxCommand({
-	command: ["pi", "--mode", "json", "-p", `Task: it's complex`],
-	outFile: "/tmp/out file.jsonl",
-	env: { WABI_SUBAGENT: "1" },
-});
-check("buildTmuxCommand: env prefix + quoted argv + redirect", cmd === `WABI_SUBAGENT='1' 'pi' '--mode' 'json' '-p' 'Task: it'\\''s complex' > '/tmp/out file.jsonl' 2>&1`);
+const reader: AgentConfig = { name: "reader", description: "", tools: ["read", "bash"], systemPrompt: "" };
+const writer: AgentConfig = { name: "writer", description: "", tools: ["read", "edit"], systemPrompt: "" };
+const unrestricted: AgentConfig = { name: "all", description: "", systemPrompt: "" };
+check("isWriter: read/bash agent is read-only by policy", !isWriter(reader));
+check("isWriter: edit/write agent writes", isWriter(writer));
+check("isWriter: unrestricted agent writes", isWriter(unrestricted));
 
-// --- parseFrontmatter / discoverAgents ---
 const md = `---
 name: test-agent
 description: A test agent
@@ -67,11 +67,11 @@ check("parseFrontmatter: body without frontmatter", parseFrontmatter("no fm").bo
 
 const repoRoot = new URL(".", import.meta.url).pathname;
 const agents = discoverAgents(`${repoRoot}agents`);
-const names = agents.map((a) => a.name).sort();
+const names = agents.map((agent) => agent.name).sort();
 check("discoverAgents: finds the 3 real agents", names.join(",") === "creative-worker,reviewer,worker");
-check("discoverAgents: worker uses cheap model + full tools", agents.find((a: AgentConfig) => a.name === "worker")?.model === "deepseek-v4-flash");
-check("discoverAgents: creative-worker uses kimi-k3", agents.find((a: AgentConfig) => a.name === "creative-worker")?.model === "kimi-k3");
-check("discoverAgents: reviewer uses the strong model", agents.find((a: AgentConfig) => a.name === "reviewer")?.model === "gpt-5.6-sol");
+check("discoverAgents: worker uses cheap model + full tools", agents.find((agent) => agent.name === "worker")?.model === "deepseek-v4-flash");
+check("discoverAgents: creative-worker uses kimi-k3", agents.find((agent) => agent.name === "creative-worker")?.model === "kimi-k3");
+check("discoverAgents: reviewer uses the strong model", agents.find((agent) => agent.name === "reviewer")?.model === "gpt-5.6-sol");
 
 if (failures > 0) {
 	console.error(`\n${failures} check(s) FAILED`);

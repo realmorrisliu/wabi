@@ -1,9 +1,9 @@
 ---
 description: Delegate code review to the reviewer agent
-argument-hint: "[scope]"
+argument-hint: "[--background] [scope]"
 ---
-Use the subagent tool in single-agent mode with the `reviewer` agent to review:
+Delegate a review to the `reviewer` agent with the subagent tool.
 
-${@:-the current working tree (`git status`, staged and unstaged changes, including untracked files)}
+Arguments: $@
 
-Report the review findings.
+Treat an optional leading `--background` as the subagent `background` flag and exclude it from the scope. If no scope remains, review the current working tree (`git status`, staged and unstaged changes, including untracked files). Report the review findings.
