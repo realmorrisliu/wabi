@@ -9,11 +9,12 @@ ln -sfn "$PWD/extensions/subagents" ~/.pi/agent/extensions/wabi-subagents
 for f in agents/*.md; do
 	ln -sf "$PWD/$f" ~/.pi/agent/agents/"$(basename "$f")"
 done
-ln -sf "$PWD/prompts/implement-and-review.md" ~/.pi/agent/prompts/implement-and-review.md
+for f in prompts/*.md; do
+	ln -sf "$PWD/$f" ~/.pi/agent/prompts/"$(basename "$f")"
+done
 
-# review.md was the old prompt-based subagent; superseded by wabi's reviewer agent.
-rm -f ~/.pi/agent/prompts/review.md
-# stale symlinks from the scout/planner era
+# stale combined prompt and symlinks from the scout/planner era
+rm -f ~/.pi/agent/prompts/implement-and-review.md
 rm -f ~/.pi/agent/agents/scout.md ~/.pi/agent/agents/planner.md ~/.pi/agent/prompts/scout-and-plan.md
 
 echo "wabi installed. Run /reload in pi to load the extension."

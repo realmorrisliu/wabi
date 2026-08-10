@@ -32,7 +32,7 @@ For creative builds, chain `creative-worker` (build) → `reviewer` (check).
 
 Optional overrides: `model`, `thinking`, `cwd`.
 
-Workflow prompt: `/implement-and-review` runs worker → reviewer as a chain.
+Workflow prompts: `/implement` delegates to `worker`; `/review` delegates to `reviewer` and defaults to the current working tree. Invoke both in sequence when needed.
 
 ## Install
 
