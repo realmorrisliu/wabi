@@ -36,10 +36,12 @@ Delegate an independent review to `reviewer` after any change in one of these ri
 - **Worker retry or uncertainty**: the worker reported retries, partial failures, or unresolved risk.
 - **Explicit user request**: the user asked for a review.
 
-## When a worker fails
+## When a subagent fails
 
 - Inspect the existing diff, refine the task, and retry once with one fresh worker.
-- After a second failure, handle in the parent only a residual that is itself atomic; otherwise report the blocker and replan.
+- Two consecutive failures with **no output** (empty infrastructure failures: nonzero exit, missing final stop reason, or provider error before any text) mean an infrastructure outage shared across all agents: **stop delegating**, report degraded mode, and run **at most one health probe** after the circuit's cooldown. Never retry blindly into an open circuit; a successful probe closes it, a failed probe reopens it.
+- A failed reviewer run is **not a review**: it contributes no review feedback, so never treat it as one; re-review only after the underlying failure is resolved.
+- After a second failure of a non-atomic multi-file worker task, **do not take the task over in the parent** — the parent may only handle a residual that is itself atomic; otherwise report the blocker and replan.
 
 ## Integrate and hand off
 

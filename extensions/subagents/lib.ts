@@ -1,7 +1,7 @@
 // Pure helpers for the wabi subagent extension. Checked by check.ts.
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, closeSync, constants as fsConstants, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 export interface AgentConfig {
@@ -24,8 +24,6 @@ export const MAX_CHILDREN = 4;
 export const HANDOFF_ENVELOPE_BYTES = 8 * 1024;
 /** Cap for the "last output" section of a failure handoff. */
 export const FAILURE_OUTPUT_BYTES = 4 * 1024;
-/** Cap for the short error line of a failure handoff. */
-export const FAILURE_ERROR_BYTES = 2 * 1024;
 /** Delivery mode for background completions: queued for before the parent's next model turn. */
 export const BACKGROUND_DELIVERY = "steer" as const;
 /** Marker appended whenever model-visible output is cut to fit a budget. */
@@ -104,20 +102,15 @@ export function contentText(content: unknown): string {
 		.join("\n");
 }
 
-/** Give one-shot children an isolated settings overlay with reliable SSE transport. */
-export function createChildAgentDir(sourceAgentDir: string, tempDir: string): string {
-	const childDir = join(tempDir, "agent");
-	mkdirSync(childDir, { mode: 0o700 });
-	for (const entry of readdirSync(sourceAgentDir)) {
-		if (entry !== "settings.json") symlinkSync(join(sourceAgentDir, entry), join(childDir, entry));
-	}
-
-	const sourceSettings = join(sourceAgentDir, "settings.json");
-	const settings = existsSync(sourceSettings) ? JSON.parse(readFileSync(sourceSettings, "utf8")) : {};
-	if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new Error("Pi settings.json must contain an object.");
-	settings.transport = "sse";
-	writeFileSync(join(childDir, "settings.json"), `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
-	return childDir;
+/**
+ * Spawn environment for one-shot children: the parent environment unchanged, so children
+ * use the canonical agent dir. A per-run overlay of symlinked auth/models state gave every
+ * child its own lock path while they wrote one shared target (pi locks with `realpath:
+ * false`), so concurrent OAuth refreshes raced; the canonical dir shares one lock path and
+ * one transport setting (no forced SSE) with the parent.
+ */
+export function childEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+	return { ...env };
 }
 
 /** Parse the deliberately flat frontmatter used by agent definitions. */
@@ -185,15 +178,26 @@ export function composeSystemPrompt(agentPrompt: string): string {
 	return agentPrompt.trimEnd() + "\n\n" + HANDOFF_CONTRACT;
 }
 
-/** Fields a model-visible handoff is allowed to contain. Provider diagnostics, stderr, and the full transcript are intentionally absent. */
+/** Structured failure metadata for a model-visible handoff: booleans and short values only, never stderr or provider diagnostics content. */
+export interface HandoffFailure {
+	exitCode: number | null;
+	exitSignal: string | null;
+	stopReason?: string;
+	hasOutput: boolean;
+	hasStderr: boolean;
+}
+
+/** Fields a model-visible handoff is allowed to contain. There is no error-content channel: raw provider diagnostics, stderr, and the full transcript are intentionally absent — the parent learns only that a provider error happened. */
 export interface HandoffFields {
 	runId: string;
 	agent: string;
 	status: "completed" | "failed" | "stopped";
-	/** Short provider error message; never stderr or provider diagnostics. */
-	error?: string;
+	/** True when the child reported a provider or spawn error. Its raw content stays private (inspector/artifact only). */
+	providerError?: boolean;
 	/** Agent's own final (success) or last (failure) text output. */
 	output: string;
+	/** Failure metadata (exit code, signal, stop reason, output/stderr presence). */
+	failure?: HandoffFailure;
 }
 
 /**
@@ -212,14 +216,488 @@ export function isolationPct(handoffBytes: number, transcriptBytes: number): num
 	return Math.max(0, Math.min(100, Math.round(100 - (handoffBytes / transcriptBytes) * 100)));
 }
 
+/**
+ * Globally unique run id: agent + per-extension-instance token + monotonic sequence.
+ * A fresh token per instance (every process start or /reload) means resumed sessions
+ * never collide with ids from before the reset sequence.
+ */
+export function createRunId(agentName: string, sequence: number, instanceToken: string): string {
+	return `${agentName}-${sequence}-${instanceToken}`;
+}
+
+/** Session-scoped run artifact directory: `<agentDir>/wabi-runs/<sessionId>/`, mode 0700 (created by the caller). Real session ids are uuidv7; the sanitization and fallback are belt-and-braces. */
+export function sessionRunsDir(agentDir: string, sessionId: string): string {
+	const safe = sessionId.replace(/[^A-Za-z0-9._-]/g, "");
+	return join(agentDir, "wabi-runs", safe === "" || safe === "." || safe === ".." ? "session" : safe);
+}
+
+/** Per-run artifact file inside a session runs dir. Run ids embed agent names, so strip path metacharacters. */
+export function runArtifactPath(runsDir: string, runId: string): string {
+	return join(runsDir, `${runId.replace(/[^A-Za-z0-9._-]/g, "")}.json`);
+}
+
+/** Hard caps for the local run archive. The README quotes these numbers; keep them in sync. */
+export const ARTIFACT_TRANSCRIPT_BYTES = 4 * 1024 * 1024; // total transcript kept (oldest entries dropped first)
+export const ARTIFACT_ENTRY_BYTES = 64 * 1024; // per transcript entry
+export const MAX_TRANSCRIPT_ENTRIES = 100_000; // per-entry JSON overhead bypasses a pure byte budget; tiny entries are count-capped too (newest retained)
+export const ARTIFACT_TASK_BYTES = 4 * 1024; // task text
+export const ARTIFACT_ERROR_BYTES = 4 * 1024; // private error message (never model-visible)
+export const ARTIFACT_STDERR_BYTES = 128 * 1024; // retained stderr (matches ingestion cap)
+export const ARTIFACT_FILE_BYTES = 16 * 1024 * 1024; // restore skips larger files before reading them
+export const ARTIFACT_MAX_RUNS = 100; // most recent runs restored per session
+
+/** Refuse to follow symlinks when opening artifact files; absent on platforms without it (Windows). */
+const O_NOFOLLOW: number | undefined = fsConstants.O_NOFOLLOW;
+
+/** Durable per-run record written mode 0600 under the session runs dir. Never fed to the parent model. */
+export interface RunArtifact {
+	kind: "wabi-run";
+	version: 1;
+	id: string;
+	agent: string;
+	task: string;
+	status: string;
+	background: boolean;
+	startedAt: number;
+	endedAt?: number;
+	exitCode: number | null;
+	exitSignal: string | null;
+	stopReason?: string;
+	errorMessage?: string;
+	hasOutput: boolean;
+	hasStderr: boolean;
+	transcript: { kind: string; text: string; at: number }[];
+	transcriptBytes: number;
+	stderr: string;
+	handoffBytes?: number;
+	usage: { input: number; output: number; cost: number };
+}
+
+const TRANSCRIPT_KINDS = new Set(["text", "thinking", "tool", "tool-result", "system"]);
+
+/** Validate and normalize persisted transcript entries: known kinds, string text capped per entry, finite timestamps, empty entries dropped. */
+function normalizeTranscript(transcript: unknown): { kind: string; text: string; at: number }[] {
+	if (!Array.isArray(transcript)) return [];
+	const result: { kind: string; text: string; at: number }[] = [];
+	for (const entry of transcript) {
+		if (!entry || typeof entry !== "object") continue;
+		const raw = entry as Record<string, unknown>;
+		const kind = typeof raw.kind === "string" && TRANSCRIPT_KINDS.has(raw.kind) ? raw.kind : "system";
+		const text = typeof raw.text === "string" ? truncateUtf8Prefix(raw.text, ARTIFACT_ENTRY_BYTES) : "";
+		if (!text) continue;
+		const at = Number(raw.at);
+		result.push({ kind, text, at: Number.isFinite(at) ? at : 0 });
+	}
+	return result;
+}
+
+const MAX_ID_BYTES = 256;
+const MAX_AGENT_BYTES = 128;
+const MAX_EXIT_SIGNAL_BYTES = 64;
+const MAX_STOP_REASON_BYTES = 256;
+
+/** Cap and sanitize a single-line persisted string: control characters have no place in an artifact, and every string is bounded. */
+function normalizePersistedString(value: unknown, maxBytes: number): string {
+	const text = typeof value === "string" ? value : String(value ?? "");
+	return truncateUtf8Prefix(text.replace(/[\u0000-\u001f\u007f]/g, ""), maxBytes);
+}
+
+/** Finite non-negative numbers only; NaN, Infinity, negatives, and non-numeric values become 0. */
+function nonNegativeFinite(value: unknown): number {
+	const number = Number(value);
+	return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+/** Finite number or null (exit codes). */
+function finiteOrNull(value: unknown): number | null {
+	if (value === null || value === undefined) return null;
+	const number = Number(value);
+	return Number.isFinite(number) ? number : null;
+}
+
+/** Finite non-negative number, or undefined (optional timestamps and byte counts). */
+function optionalNonNegative(value: unknown): number | undefined {
+	if (value === undefined) return undefined;
+	const number = Number(value);
+	return Number.isFinite(number) && number >= 0 ? number : undefined;
+}
+
+/** Usage counters normalize to finite non-negative numbers. */
+function normalizeUsage(usage: unknown): { input: number; output: number; cost: number } {
+	const raw = (usage ?? {}) as Record<string, unknown>;
+	return { input: nonNegativeFinite(raw.input), output: nonNegativeFinite(raw.output), cost: nonNegativeFinite(raw.cost) };
+}
+
+/** Keep the newest entries that fit `maxBytes`, dropping oldest first; when even one entry exceeds the budget its text is truncated (UTF-8-safe), so the budget always holds. Tiny entries carry fixed JSON overhead the byte budget cannot see, so the count is also capped at MAX_TRANSCRIPT_ENTRIES (newest retained). */
+function capTranscript(entries: { kind: string; text: string; at: number }[], maxBytes: number): { kind: string; text: string; at: number }[] {
+	if (maxBytes <= 0) return [];
+	const result = [...entries];
+	let used = result.reduce((sum, entry) => sum + Buffer.byteLength(entry.text), 0);
+	while (used > maxBytes && result.length > 1) {
+		used -= Buffer.byteLength(result.shift()!.text);
+	}
+	if (used > maxBytes) {
+		const entry = result[0]!;
+		result[0] = { ...entry, text: truncateUtf8Prefix(entry.text, maxBytes) };
+	}
+	return result.length > MAX_TRANSCRIPT_ENTRIES ? result.slice(-MAX_TRANSCRIPT_ENTRIES) : result;
+}
+
+/** Worst-case UTF-8 bytes JSON.stringify emits for a string, quotes included: single-escape characters cost 2, escaped code units (control characters, lone surrogates, U+2028/29) cost 6, valid surrogate pairs and ordinary text cost their raw UTF-8 length. An upper bound on any engine's output; bun emits DEL and U+2028/29 raw, so those are over-counted, never under. */
+function jsonStringBytesMax(text: string): number {
+	let bytes = 2; // surrounding quotes
+	for (let i = 0; i < text.length; i++) {
+		const code = text.charCodeAt(i);
+		if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length) {
+			const low = text.charCodeAt(i + 1);
+			if (low >= 0xdc00 && low <= 0xdfff) {
+				bytes += 4; // valid surrogate pair: emitted raw
+				i++;
+				continue;
+			}
+		}
+		if (code === 0x22 || code === 0x5c || code === 0x08 || code === 0x0c || code === 0x0a || code === 0x0d || code === 0x09) bytes += 2;
+		else if (code < 0x20 || code >= 0xd800 || code === 0x2028 || code === 0x2029) bytes += 6;
+		else bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : 3;
+	}
+	return bytes;
+}
+
+/** Fixed JSON around a transcript entry's variable parts: `{"kind":"` + kind + `","text":"` + text + `","at":` + number + `}`. */
+const TRANSCRIPT_ENTRY_JSON_OVERHEAD = 9 + 9 + 6 + 1;
+
+/**
+ * The loader skips artifacts larger than ARTIFACT_FILE_BYTES, so the writer must never emit one.
+ * The transcript byte budget counts raw text only, while JSON escaping and per-entry overhead
+ * inflate the serialized size, so drop the oldest entries until a conservative size bound
+ * (exact fixed-field skeleton plus each kept entry's worst case) fits the file cap. Single
+ * pass over the entries, no iterative re-serialization.
+ */
+function fitTranscriptToFileSize(artifact: RunArtifact): RunArtifact {
+	const transcript = artifact.transcript;
+	if (transcript.length === 0) return artifact;
+	const skeletonBytes = Buffer.byteLength(JSON.stringify({ ...artifact, transcript: [] })); // transcriptBytes holds the pre-fit sum, so it only over-states once entries drop
+	const bounds = new Array<number>(transcript.length);
+	let bound = skeletonBytes;
+	for (let i = 0; i < transcript.length; i++) {
+		const entry = transcript[i];
+		// +1 for the array comma after every entry but the last (the last is never dropped, so the accounting stays exact as entries drop from the front)
+		bounds[i] = TRANSCRIPT_ENTRY_JSON_OVERHEAD + entry.kind.length + jsonStringBytesMax(entry.text) + String(entry.at).length + (i + 1 < transcript.length ? 1 : 0);
+		bound += bounds[i];
+	}
+	let keep = transcript.length;
+	for (let i = 0; bound > ARTIFACT_FILE_BYTES && keep > 1; i++) {
+		bound -= bounds[i];
+		keep--;
+	}
+	if (keep === transcript.length) return artifact;
+	const fitted = transcript.slice(-keep);
+	return { ...artifact, transcript: fitted, transcriptBytes: fitted.reduce((sum, entry) => sum + Buffer.byteLength(entry.text), 0) };
+}
+
+/** Serialize a run artifact, explicitly constructing every persisted field: identifiers sanitized and capped, status terminal, usage finite non-negative, transcript capped to the budget and count, and the serialized output always within ARTIFACT_FILE_BYTES. */
+export function serializeRunArtifact(artifact: RunArtifact, maxBytes = ARTIFACT_TRANSCRIPT_BYTES): string {
+	const transcript = capTranscript(normalizeTranscript(artifact.transcript), maxBytes);
+	const transcriptBytes = transcript.reduce((sum, entry) => sum + Buffer.byteLength(entry.text), 0);
+	const id = normalizePersistedString(artifact.id, MAX_ID_BYTES);
+	const agent = normalizePersistedString(artifact.agent, MAX_AGENT_BYTES);
+	const normalized: RunArtifact = {
+		kind: "wabi-run",
+		version: 1,
+		id: id || "unknown",
+		agent: agent || "unknown",
+		task: truncateUtf8Prefix(String(artifact.task ?? ""), ARTIFACT_TASK_BYTES),
+		status: artifact.status === "completed" || artifact.status === "failed" || artifact.status === "stopped" ? artifact.status : "failed",
+		background: artifact.background === true,
+		startedAt: nonNegativeFinite(artifact.startedAt),
+		endedAt: optionalNonNegative(artifact.endedAt),
+		exitCode: finiteOrNull(artifact.exitCode),
+		exitSignal: artifact.exitSignal === null || artifact.exitSignal === undefined ? null : normalizePersistedString(artifact.exitSignal, MAX_EXIT_SIGNAL_BYTES) || null,
+		stopReason: artifact.stopReason === undefined ? undefined : normalizePersistedString(artifact.stopReason, MAX_STOP_REASON_BYTES),
+		errorMessage: artifact.errorMessage === undefined ? undefined : truncateUtf8Prefix(String(artifact.errorMessage), ARTIFACT_ERROR_BYTES),
+		hasOutput: artifact.hasOutput === true,
+		hasStderr: artifact.hasStderr === true,
+		transcript,
+		transcriptBytes,
+		stderr: truncateUtf8Prefix(String(artifact.stderr ?? ""), ARTIFACT_STDERR_BYTES),
+		handoffBytes: optionalNonNegative(artifact.handoffBytes),
+		usage: normalizeUsage(artifact.usage),
+	};
+	return JSON.stringify(fitTranscriptToFileSize(normalized));
+}
+
+/** Parse a run artifact into a fully validated, normalized record; returns undefined for corrupt, foreign, or oversized-lie files. */
+export function parseRunArtifact(text: string): RunArtifact | undefined {
+	try {
+		const value = JSON.parse(text);
+		if (!value || typeof value !== "object") return undefined;
+		const raw = value as Record<string, unknown>;
+		if (raw.kind !== "wabi-run" || raw.version !== 1) return undefined;
+		const id = typeof raw.id === "string" ? normalizePersistedString(raw.id, MAX_ID_BYTES) : "";
+		if (id === "") return undefined;
+		const agent = typeof raw.agent === "string" ? normalizePersistedString(raw.agent, MAX_AGENT_BYTES) : "";
+		if (agent === "") return undefined;
+		if (typeof raw.task !== "string") return undefined;
+		// Only terminal statuses exist in artifacts; anything else is foreign/corrupt.
+		if (raw.status !== "completed" && raw.status !== "failed" && raw.status !== "stopped") return undefined;
+		const startedAt = Number(raw.startedAt);
+		if (!Number.isFinite(startedAt)) return undefined;
+		const endedAt = Number(raw.endedAt);
+		const exitCode = raw.exitCode === null || raw.exitCode === undefined ? null : Number(raw.exitCode);
+		const transcript = capTranscript(normalizeTranscript(raw.transcript), ARTIFACT_TRANSCRIPT_BYTES);
+		const transcriptBytes = transcript.reduce((sum, entry) => sum + Buffer.byteLength(entry.text), 0);
+		const stopReason = typeof raw.stopReason === "string" ? normalizePersistedString(raw.stopReason, MAX_STOP_REASON_BYTES) : undefined;
+		const errorMessage = typeof raw.errorMessage === "string" ? truncateUtf8Prefix(raw.errorMessage, ARTIFACT_ERROR_BYTES) : undefined;
+		const stderr = typeof raw.stderr === "string" ? truncateUtf8Prefix(raw.stderr, ARTIFACT_STDERR_BYTES) : "";
+		return {
+			kind: "wabi-run",
+			version: 1,
+			id,
+			agent,
+			task: truncateUtf8Prefix(raw.task, ARTIFACT_TASK_BYTES),
+			status: raw.status as RunArtifact["status"],
+			background: raw.background === true,
+			startedAt,
+			endedAt: Number.isFinite(endedAt) ? endedAt : undefined,
+			exitCode: Number.isFinite(exitCode) ? exitCode : null,
+			exitSignal: typeof raw.exitSignal === "string" ? normalizePersistedString(raw.exitSignal, MAX_EXIT_SIGNAL_BYTES) || null : null,
+			stopReason,
+			errorMessage,
+			hasOutput: raw.hasOutput === true,
+			hasStderr: raw.hasStderr === true,
+			transcript,
+			transcriptBytes,
+			stderr,
+			handoffBytes: optionalNonNegative(raw.handoffBytes),
+			usage: normalizeUsage(raw.usage),
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Read one artifact file through a single descriptor: on platforms with O_NOFOLLOW (all POSIX)
+ * a symlink fails at open, and the descriptor's own fstat must report a regular file within the
+ * size cap before anything is read. On platforms without O_NOFOLLOW (Windows) an lstat pre-check
+ * rejects symlinks first, and the same fstat still guards the descriptor. The fd is always closed.
+ */
+function readArtifactFile(path: string): string | undefined {
+	if (O_NOFOLLOW === undefined) {
+		try {
+			const stats = lstatSync(path);
+			if (!stats.isFile() || stats.size > ARTIFACT_FILE_BYTES) return undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	let fd: number;
+	try {
+		fd = openSync(path, O_NOFOLLOW === undefined ? fsConstants.O_RDONLY : fsConstants.O_RDONLY | O_NOFOLLOW);
+	} catch {
+		return undefined;
+	}
+	try {
+		const stats = fstatSync(fd);
+		if (!stats.isFile() || stats.size > ARTIFACT_FILE_BYTES) return undefined;
+		return readFileSync(fd, "utf8");
+	} catch {
+		return undefined;
+	} finally {
+		closeSync(fd);
+	}
+}
+
+/** Load every run artifact in a session runs dir, oldest first. Symlinks, oversized files, and corrupt files are skipped; at most ARTIFACT_MAX_RUNS are restored. */
+export function loadRunArtifacts(dir: string): RunArtifact[] {
+	let entries: string[];
+	try {
+		entries = readdirSync(dir);
+	} catch {
+		return [];
+	}
+	const artifacts: RunArtifact[] = [];
+	for (const entry of entries) {
+		if (!entry.endsWith(".json")) continue;
+		const text = readArtifactFile(join(dir, entry));
+		if (text === undefined) continue;
+		const artifact = parseRunArtifact(text);
+		if (artifact) artifacts.push(artifact);
+	}
+	artifacts.sort((a, b) => a.startedAt - b.startedAt);
+	return artifacts.slice(-ARTIFACT_MAX_RUNS);
+}
+
+/** Create the session runs dir (and its `wabi-runs` parent) mode 0700, chmodding them even when they pre-exist. */
+export function ensureRunsDir(runsDir: string): void {
+	mkdirSync(runsDir, { recursive: true, mode: 0o700 });
+	chmodSync(runsDir, 0o700);
+	try {
+		chmodSync(dirname(runsDir), 0o700);
+	} catch {
+		// Parent does not exist; nothing to harden.
+	}
+}
+
+/** Atomically persist a run artifact: uniquely named exclusive 0600 temp file, then rename over the final path (which replaces, never follows, a pre-created symlink), then force final 0600. */
+export function writeRunArtifact(runsDir: string, runId: string, artifact: RunArtifact): void {
+	ensureRunsDir(runsDir);
+	const safe = runId.replace(/[^A-Za-z0-9._-]/g, "");
+	const tmpPath = join(runsDir, `.${safe}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`);
+	const fd = openSync(tmpPath, "wx", 0o600); // exclusive create; a pre-created temp cannot be raced
+	try {
+		writeFileSync(fd, serializeRunArtifact(artifact), "utf8");
+	} catch (error) {
+		closeSync(fd);
+		rmSync(tmpPath, { force: true });
+		throw error;
+	}
+	closeSync(fd);
+	try {
+		renameSync(tmpPath, runArtifactPath(runsDir, runId)); // atomic; replaces a symlink at the final path without following it
+		chmodSync(runArtifactPath(runsDir, runId), 0o600); // final mode regardless of umask
+	} catch (error) {
+		rmSync(tmpPath, { force: true });
+		throw error;
+	}
+}
+
+/** Finish every run still unresolved, exactly once each: runs already settled are skipped, and the caller's `finish` must be idempotent (its own `finished` guard). Returns how many runs were finished. */
+export function finishUnresolvedRuns<T extends { finished: boolean }>(runs: readonly T[], finish: (run: T) => void): number {
+	let count = 0;
+	for (const run of runs) {
+		if (run.finished) continue;
+		finish(run);
+		count++;
+	}
+	return count;
+}
+
+/** Immutable archived view of a finished run, restored from a durable artifact for `/subagents` after reload/resume. No live decoder, promises, or mutable maps. */
+export interface ArchivedRun {
+	archived: true;
+	id: string;
+	agentName: string;
+	task: string;
+	status: "completed" | "failed" | "stopped";
+	startedAt: number;
+	endedAt?: number;
+	transcript: { kind: string; text: string; at: number }[];
+	transcriptBytes: number;
+	handoffBytes?: number;
+}
+
+/** Build the archived view from an already-normalized artifact. */
+export function archivedRunOf(artifact: RunArtifact): ArchivedRun {
+	return {
+		archived: true,
+		id: artifact.id,
+		agentName: artifact.agent,
+		task: artifact.task,
+		status: artifact.status as "completed" | "failed" | "stopped",
+		startedAt: artifact.startedAt,
+		endedAt: artifact.endedAt,
+		transcript: artifact.transcript,
+		transcriptBytes: artifact.transcriptBytes,
+		handoffBytes: artifact.handoffBytes,
+	};
+}
+
+export type CircuitState = "closed" | "open" | "half-open";
+
+/** Fixed shared-circuit policy: two consecutive empty failures open; 60 s cooldown; one probe. */
+export const CIRCUIT_FAILURE_THRESHOLD = 2;
+export const CIRCUIT_COOLDOWN_MS = 60_000;
+
+/**
+ * One global circuit breaker for every child launch, so a shared infrastructure outage
+ * (provider, spawn, auth) trips across agent roles. Consecutive empty failures open it;
+ * launches are denied until the cooldown elapses, then exactly one launch (the health
+ * probe) is allowed while the circuit re-arms behind it. A probe success closes it, a
+ * probe failure reopens it with a fresh cooldown, and a stopped probe releases the probe
+ * slot without counting. Runs admitted before the circuit opened still count normally
+ * when they finish: successes/failed-with-output reset, empty failures count.
+ */
+export class CircuitBreaker {
+	private state: CircuitState = "closed";
+	private failures = 0;
+	private openedAt = 0;
+	private probeInFlight = false;
+
+	stateName(): CircuitState {
+		return this.state;
+	}
+
+	/** May a launch proceed right now? A half-open circuit admits exactly one probe. */
+	allowLaunch(now = Date.now()): boolean {
+		if (this.state === "closed") return true;
+		if (this.state === "open" && now - this.openedAt >= CIRCUIT_COOLDOWN_MS) this.state = "half-open";
+		if (this.state === "half-open") {
+			if (this.probeInFlight) return false;
+			this.probeInFlight = true;
+			return true;
+		}
+		return false;
+	}
+
+	/** A run produced a normal final answer or any agent output: close the circuit and reset the count. */
+	recordSuccess(): void {
+		this.state = "closed";
+		this.failures = 0;
+		this.probeInFlight = false;
+	}
+
+	/** A probe run ended without a verdict (user stop or parent abort): release the probe slot so the next launch can probe again, without counting. */
+	recordStopped(): void {
+		if (this.state === "half-open") this.probeInFlight = false;
+	}
+
+	/** A run failed with no agent output. The probe's failure reopens with a fresh cooldown. */
+	recordEmptyFailure(now = Date.now()): void {
+		this.probeInFlight = false;
+		if (this.state !== "closed") {
+			this.state = "open";
+			this.openedAt = now;
+			this.failures = 0;
+			return;
+		}
+		this.failures++;
+		if (this.failures >= CIRCUIT_FAILURE_THRESHOLD) {
+			this.state = "open";
+			this.openedAt = now;
+			this.failures = 0;
+		}
+	}
+}
+
+/** Model-visible circuit rejection: tells the parent to stop delegating and report degraded mode. */
+export function circuitBlockedMessage(agentName: string): string {
+	return `Subagent launch blocked: the circuit for agent "${agentName}" is open after ${CIRCUIT_FAILURE_THRESHOLD} consecutive no-output failures. Treat this as an infrastructure outage: stop delegating, report degraded mode, and run at most one health probe after the cooldown.`;
+}
+
 function formatSuccessBody(fields: HandoffFields): string {
 	return fields.output.trim() || "(no text output)";
 }
 
 function formatFailureBody(fields: HandoffFields): string {
-	const error = truncateUtf8(fields.error?.trim() || `child exited with status ${fields.status}`, FAILURE_ERROR_BYTES);
+	const failure = fields.failure;
+	const parts: string[] = [];
+	if (fields.providerError) {
+		// Only the boolean crosses the model boundary; raw provider diagnostics stay in the inspector/artifact.
+		parts.push("Error: providerError: present (raw provider diagnostics withheld; inspect via /subagents)");
+	} else {
+		const exit = failure
+			? `child exited with code ${failure.exitCode ?? "none"}${failure.exitSignal ? `, signal ${failure.exitSignal}` : ""}`
+			: `child exited with status ${fields.status}`;
+		parts.push(`Error: ${exit}`);
+	}
+	if (failure) {
+		const exit = `exit: code ${failure.exitCode ?? "none"} \u00b7 signal ${failure.exitSignal ?? "none"} \u00b7 stopReason ${failure.stopReason ?? "none"}`;
+		const output = failure.hasOutput ? "output: partial (agent text below; full transcript retained locally)" : "output: none (failed before any output)";
+		const stderr = failure.hasStderr ? "stderr: present (retained locally; never shown to the parent model)" : "stderr: none";
+		parts.push([exit, output, stderr].join("\n"));
+	}
 	const output = fields.output.trim();
-	const parts = [`Error: ${error}`];
 	if (output) parts.push(`Last output (potentially incomplete):\n${truncateUtf8(output, FAILURE_OUTPUT_BYTES)}`);
 	return parts.join("\n\n");
 }

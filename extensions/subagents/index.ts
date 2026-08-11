@@ -13,24 +13,38 @@ import { Key, Text, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earen
 import { Type } from "typebox";
 import {
 	type AgentConfig,
+	type ArchivedRun,
 	type HandoffFields,
 	BACKGROUND_DELIVERY,
 	JsonlDecoder,
+	CircuitBreaker,
+	archivedRunOf,
+	childEnv,
+	circuitBlockedMessage,
 	composeSystemPrompt,
 	contentText,
-	createChildAgentDir,
+	createRunId,
 	discoverAgents,
+	ensureRunsDir,
+	finishUnresolvedRuns,
 	formatDuration,
 	formatHandoff,
 	isCompletedRun,
 	isolationPct,
 	isWriter,
 	launchPolicy,
+	loadRunArtifacts,
+	sessionRunsDir,
+	writeRunArtifact,
 } from "./lib.ts";
 
 const STDERR_BYTES = 128 * 1024;
 const COMPLETED_WIDGET_MS = 5_000;
 const FORCE_KILL_MS = 5_000;
+/** If a spawn failed, `close` never fires; this bounds the wait before finalizing. */
+const ERROR_FALLBACK_MS = 1_000;
+/** After SIGKILL, how long to wait for the child's `close` event before finalizing the run ourselves. */
+const CLOSE_GRACE_MS = 500;
 const WIDGET_KEY = "wabi-subagents";
 const COMPLETION_TYPE = "wabi-subagent-complete";
 
@@ -62,10 +76,15 @@ interface RunRecord {
 	currentTool?: string;
 	model?: string;
 	lastStopReason?: string;
+	exitCode?: number | null;
+	exitSignal?: string | null;
 	errorMessage?: string;
+	hasOutput: boolean;
+	hasStderr: boolean;
 	stderr: string;
 	finalText: string;
 	handoffBytes?: number;
+	handoffText?: string;
 	transcript: TranscriptEntry[];
 	transcriptBytes: number;
 	liveText: Map<number, string>;
@@ -83,6 +102,15 @@ interface RunRecord {
 	onUpdate?: (result: AgentToolResult<SubagentDetails>) => void;
 	updateTimer?: ReturnType<typeof setTimeout>;
 	killTimer?: ReturnType<typeof setTimeout>;
+	/** Bounded fallback finalization for a spawn failure whose `close` never fires. */
+	fallbackTimer?: ReturnType<typeof setTimeout>;
+}
+
+/** A live run or an immutable archived run (restored from this session's artifact dir). */
+type InspectorRun = RunRecord | ArchivedRun;
+
+function isArchived(run: InspectorRun): boolean {
+	return "archived" in run && run.archived;
 }
 
 interface RunView {
@@ -117,10 +145,9 @@ const SubagentParams = Type.Object({
 	),
 });
 
-function isActive(run: RunRecord): boolean {
+function isActive(run: { status: RunStatus }): boolean {
 	return run.status === "starting" || run.status === "running" || run.status === "stopping";
 }
-
 function safeJson(value: unknown): string {
 	try {
 		return JSON.stringify(value);
@@ -177,21 +204,30 @@ function statusIcon(status: RunStatus): string {
 	}
 }
 
-/** Bounded, model-visible handoff for a finished run. Only the agent's own error message and text output are included; provider diagnostics, stderr, and the transcript stay inspector-only (user-inspectable via /subagents). */
+/** Bounded, model-visible handoff for a finished run. Only the agent's own text output and failure metadata (provider error presence, exit code, signal, stop reason, output/stderr presence) are included; raw provider diagnostics, stderr, and the transcript stay inspector-only (user-inspectable via /subagents). */
 function runHandoff(run: RunRecord): string {
+	if (run.handoffText) return run.handoffText;
 	const status: HandoffFields["status"] = run.status === "completed" ? "completed" : run.status === "failed" ? "failed" : "stopped";
 	const text = formatHandoff({
 		runId: run.id,
 		agent: run.agent.name,
 		status,
-		error: run.errorMessage,
+		providerError: Boolean(run.errorMessage),
 		output: status === "completed" ? run.finalText : lastOutput(run),
+		failure: status === "completed" ? undefined : {
+			exitCode: run.exitCode ?? null,
+			exitSignal: run.exitSignal ?? null,
+			stopReason: run.lastStopReason,
+			hasOutput: run.hasOutput,
+			hasStderr: run.hasStderr,
+		},
 	});
 	run.handoffBytes = Buffer.byteLength(text);
+	run.handoffText = text;
 	return text;
 }
 
-function runIsolationPct(run: RunRecord): number | undefined {
+function runIsolationPct(run: { handoffBytes?: number; transcriptBytes: number }): number | undefined {
 	if (!run.handoffBytes || !run.transcriptBytes) return undefined;
 	return isolationPct(run.handoffBytes, run.transcriptBytes);
 }
@@ -209,11 +245,57 @@ export default function (pi: ExtensionAPI) {
 		.map((agent) => `${agent.name}: ${agent.description}`)
 		.join("; ") || "none configured";
 	const runs = new Map<string, RunRecord>();
+	/** Runs restored from this session's durable artifact dir after a reload/resume: immutable archived views. */
+	const history = new Map<string, ArchivedRun>();
+	/** One shared circuit for all child launches: a shared infrastructure outage trips it across agent roles. */
+	const circuit = new CircuitBreaker();
+	let runsDir: string | undefined;
 	let sequence = 0;
+	/** Fresh per extension instance (every process start or /reload), so run ids never collide across resets. */
+	const instanceToken = Math.random().toString(36).slice(2, 10);
 	let latestCtx: ExtensionContext | undefined;
 	let widgetTimer: ReturnType<typeof setInterval> | undefined;
 	let inspectorOpen = false;
 	let shuttingDown = false;
+
+	/** Durable per-parent-session postmortem record: full transcript + stderr kept locally only, mode 0600 under a mode-0700 session dir, written atomically. */
+	function persistRun(run: RunRecord): void {
+		if (!runsDir) return;
+		try {
+			writeRunArtifact(runsDir, run.id, {
+				kind: "wabi-run",
+				version: 1,
+				id: run.id,
+				agent: run.agent.name,
+				task: run.task,
+				status: run.status,
+				background: run.background,
+				startedAt: run.startedAt,
+				endedAt: run.endedAt,
+				exitCode: run.exitCode ?? null,
+				exitSignal: run.exitSignal ?? null,
+				stopReason: run.lastStopReason,
+				errorMessage: run.errorMessage,
+				hasOutput: run.hasOutput,
+				hasStderr: run.hasStderr,
+				transcript: run.transcript,
+				transcriptBytes: run.transcriptBytes,
+				stderr: run.stderr,
+				handoffBytes: run.handoffBytes,
+				usage: run.usage,
+			});
+		} catch (error) {
+			// A failed artifact write must never break the run flow; the run record is still in memory.
+			console.error(`wabi: failed to persist run artifact for ${run.id}: ${String(error)}`);
+		}
+	}
+
+	/** Feed the shared circuit: completed/failed-with-output reset it, empty failures trip it, stopped probes release the probe slot without counting. */
+	function recordCircuitResult(run: RunRecord): void {
+		if (run.status === "completed" || (run.status === "failed" && run.hasOutput)) circuit.recordSuccess();
+		else if (run.status === "failed" && !run.hasOutput && !run.stopRequested) circuit.recordEmptyFailure();
+		else if (run.status === "stopped") circuit.recordStopped();
+	}
 
 	function visibleWidgetRuns(now = Date.now()): RunRecord[] {
 		return [...runs.values()].filter((run) => isActive(run) || (run.widgetUntil ?? 0) > now);
@@ -385,7 +467,7 @@ export default function (pi: ExtensionAPI) {
 		);
 	}
 
-	function finishRun(run: RunRecord, exitCode: number | null): void {
+	function finishRun(run: RunRecord, exitCode: number | null, exitSignal: string | null): void {
 		if (run.finished) return;
 		applyDecoded(run, run.decoder.flush());
 		// Commit any streaming state as partial transcript entries before clearing it, so
@@ -396,6 +478,10 @@ export default function (pi: ExtensionAPI) {
 		if (run.liveToolResult) append(run, "tool-result", `${run.currentTool ?? "tool"} (partial)\n${run.liveToolResult}`);
 		run.finished = true;
 		run.endedAt = Date.now();
+		run.exitCode = exitCode;
+		run.exitSignal = exitSignal;
+		run.hasOutput = run.finalText.trim() !== "" || lastOutput(run).trim() !== "";
+		run.hasStderr = run.stderr.trim() !== "";
 		run.liveText.clear();
 		run.liveThinking.clear();
 		run.currentTool = undefined;
@@ -406,11 +492,14 @@ export default function (pi: ExtensionAPI) {
 		else run.status = "failed";
 
 		if (run.status === "failed" && run.stderr.trim()) append(run, "system", run.stderr.trim());
-		if (!run.finalText && run.errorMessage) run.finalText = run.errorMessage;
 		run.widgetUntil = run.endedAt + COMPLETED_WIDGET_MS;
 		if (run.updateTimer) clearTimeout(run.updateTimer);
 		if (run.killTimer) clearTimeout(run.killTimer);
+		if (run.fallbackTimer) clearTimeout(run.fallbackTimer);
 		if (run.tempDir) rmSync(run.tempDir, { recursive: true, force: true });
+		runHandoff(run); // cache the model-visible handoff so handoffBytes lands in the artifact
+		recordCircuitResult(run);
+		persistRun(run);
 		emitUpdate(run, true);
 		ensureWidget();
 		run.resolveDone(run);
@@ -429,7 +518,7 @@ export default function (pi: ExtensionAPI) {
 			resolveDone = resolve;
 		});
 		const run: RunRecord = {
-			id: `${agent.name}-${++sequence}`,
+			id: createRunId(agent.name, ++sequence, instanceToken),
 			agent,
 			task,
 			background,
@@ -439,10 +528,13 @@ export default function (pi: ExtensionAPI) {
 			stderr: "",
 			finalText: "",
 			handoffBytes: undefined,
+			handoffText: undefined,
 			transcript: [],
 			transcriptBytes: 0,
 			liveText: new Map(),
 			liveThinking: new Map(),
+			hasOutput: false,
+			hasStderr: false,
 			usage: { input: 0, output: 0, cost: 0 },
 			decoder: new JsonlDecoder(),
 			suppressHandoff: false,
@@ -469,14 +561,13 @@ export default function (pi: ExtensionAPI) {
 
 		try {
 			run.tempDir = mkdtempSync(join(tmpdir(), "wabi-"));
-			const childAgentDir = createChildAgentDir(piAgentDir, run.tempDir);
 			const promptFile = join(run.tempDir, "prompt.md");
 			writeFileSync(promptFile, composeSystemPrompt(agent.systemPrompt), { encoding: "utf8", mode: 0o600 });
 			args.push("--append-system-prompt", promptFile);
 			args.push(`Task: ${task}`);
 			const child = spawn("pi", args, {
 				cwd: ctx.cwd,
-				env: { ...process.env, PI_CODING_AGENT_DIR: childAgentDir },
+				env: childEnv(), // canonical agent dir: children share the parent's locks on auth.json/models-store.json
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			run.process = child;
@@ -488,13 +579,20 @@ export default function (pi: ExtensionAPI) {
 				run.stderr = (run.stderr + chunk.toString()).slice(-STDERR_BYTES);
 			});
 			child.on("error", (error) => {
+				// Record, but never finalize here: `close` carries the authoritative (code, signal).
 				run.errorMessage = String(error);
-				finishRun(run, 1);
+				// After a spawn failure there is no pid and `close` never fires; bound the wait.
+				if (child.pid === undefined) {
+					run.fallbackTimer = setTimeout(() => {
+						if (!run.finished) finishRun(run, null, null);
+					}, ERROR_FALLBACK_MS);
+				}
+				emitUpdate(run);
 			});
-			child.on("close", (code) => finishRun(run, code));
+			child.on("close", (code, signal) => finishRun(run, code, signal));
 		} catch (error) {
 			run.errorMessage = String(error);
-			finishRun(run, 1);
+			finishRun(run, null, null);
 		}
 
 		emitUpdate(run, true);
@@ -515,7 +613,7 @@ export default function (pi: ExtensionAPI) {
 		ensureWidget();
 	}
 
-	function transcriptLines(run: RunRecord, width: number, showThinking: boolean, theme: any): string[] {
+	function transcriptLines(run: { transcript: { kind: string; text: string; at: number }[]; liveText?: Map<number, string>; liveThinking?: Map<number, string>; liveToolResult?: string; currentTool?: string }, width: number, showThinking: boolean, theme: any): string[] {
 		const lines: string[] = [];
 		const add = (prefix: string, text: string, color: string) => {
 			const styledPrefix = theme.fg("dim", prefix);
@@ -535,9 +633,9 @@ export default function (pi: ExtensionAPI) {
 			else add("system› ", entry.text, "warning");
 		}
 		if (showThinking) {
-			for (const thinking of run.liveThinking.values()) if (thinking) add("think › ", thinking, "dim");
+			for (const thinking of run.liveThinking?.values() ?? []) if (thinking) add("think › ", thinking, "dim");
 		}
-		for (const text of run.liveText.values()) if (text) add("agent › ", text, "text");
+		for (const text of run.liveText?.values() ?? []) if (text) add("agent › ", text, "text");
 		if (run.liveToolResult) add("result› ", `${run.currentTool ?? "tool"} (live)\n${run.liveToolResult}`, "muted");
 		return lines.length > 0 ? lines : [theme.fg("dim", "(no transcript yet)")];
 	}
@@ -552,12 +650,12 @@ export default function (pi: ExtensionAPI) {
 		let timer: ReturnType<typeof setInterval> | undefined;
 		try {
 			await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-				let selectedId = [...runs.keys()].at(-1);
+				let selectedId = [...runs.keys()].at(-1) ?? [...history.keys()].at(-1);
 				let scroll = 0;
 				let showThinking = false;
 				let confirmStop: string | undefined;
 
-				const ordered = () => [...runs.values()];
+				const ordered = () => [...runs.values(), ...history.values()];
 				const selected = () => {
 					const all = ordered();
 					return all.find((run) => run.id === selectedId) ?? all.at(-1);
@@ -575,7 +673,8 @@ export default function (pi: ExtensionAPI) {
 				return {
 					render(width: number): string[] {
 						const all = ordered();
-						const lines = [theme.fg("accent", theme.bold(`Subagents · ${all.length}`))];
+						const archivedCount = history.size;
+						const lines = [theme.fg("accent", theme.bold(`Subagents · ${all.length}${archivedCount > 0 ? ` (${archivedCount} archived from this session's run history)` : ""}`))];
 						if (all.length === 0) {
 							lines.push("", theme.fg("dim", "No runs in this session."), "", theme.fg("dim", "Esc close"));
 							return lines.map((line) => truncateToWidth(line, width));
@@ -589,8 +688,8 @@ export default function (pi: ExtensionAPI) {
 							const marker = run.id === current.id ? theme.fg("accent", ">") : " ";
 							const color = run.status === "failed" ? "error" : run.status === "completed" ? "success" : run.status === "stopped" ? "warning" : "accent";
 							const elapsed = formatDuration((run.endedAt ?? Date.now()) - run.startedAt);
-							const tool = run.currentTool ? ` · ${run.currentTool}` : "";
-							lines.push(`${marker} ${theme.fg(color, statusIcon(run.status))} ${run.id} ${theme.fg("muted", run.status + tool)} ${theme.fg("dim", elapsed)}`);
+							const tool = "currentTool" in run && run.currentTool ? ` · ${run.currentTool}` : "";
+							lines.push(`${marker} ${theme.fg(color, statusIcon(run.status))} ${run.id} ${theme.fg("muted", run.status + (isArchived(run) ? " · archived" : "") + tool)} ${theme.fg("dim", elapsed)}`);
 						}
 						lines.push(theme.fg("dim", "─".repeat(Math.max(1, width))), theme.fg("muted", `Task: ${current.task}`));
 
@@ -612,7 +711,10 @@ export default function (pi: ExtensionAPI) {
 					handleInput(data: string): void {
 						const current = selected();
 						if (confirmStop) {
-							if ((data === "y" || matchesKey(data, Key.enter)) && current?.id === confirmStop) stopRun(current, "stopped by user");
+							if (data === "y" || matchesKey(data, Key.enter)) {
+								const live = runs.get(confirmStop);
+								if (live) stopRun(live, "stopped by user");
+							}
 							confirmStop = undefined;
 							tui.requestRender();
 							return;
@@ -654,6 +756,9 @@ export default function (pi: ExtensionAPI) {
 			"Issue sibling foreground subagent calls in one assistant message for independent blocking work so they run in parallel; do not duplicate delegated scope across subagents.",
 			"Use subagent in background only for read-only, nonblocking work (scout, reviewer); write-capable subagents (worker, creative-worker) must run in the foreground.",
 			"Never poll or sleep for a subagent; never answer before required subagent runs finish — await each result, then integrate and verify it.",
+			"Two consecutive subagent failures with no output mean an infrastructure outage (shared across all agents): stop delegating, report degraded mode, and run at most one health probe after the cooldown — never retry blindly into an open circuit.",
+			"A failed subagent reviewer run is not a review: it provides no review feedback, so never treat it as one; re-review only after the underlying failure is resolved.",
+			"After two failures of a non-atomic multi-file worker subagent task, do not take the task over in the parent: keep in the parent only a residual that is itself atomic, otherwise report the blocker and replan.",
 			"After risky subagent changes, delegate an independent review to the reviewer subagent (the subagent-orchestration skill lists the risk classes); verify the integrated result in the parent without repeating the worker's exploration.",
 			"Consult the subagent-orchestration skill for detailed routing and agent selection.",
 		],
@@ -677,6 +782,10 @@ export default function (pi: ExtensionAPI) {
 				activeWriterCount: active.filter((run) => run.writer).length,
 			});
 			if (policyError) throw new Error(policyError);
+
+			// Circuit admission sits immediately before the launch: every rejection path above
+			// runs first, so a half-open probe can only be consumed by an actual launch.
+			if (!circuit.allowLaunch()) throw new Error(circuitBlockedMessage(agent.name));
 
 			const run = launchRun(agent, params.task.trim(), background, ctx, background ? undefined : onUpdate);
 
@@ -731,6 +840,17 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", (_event, ctx) => {
 		latestCtx = ctx;
 		shuttingDown = false;
+		runsDir = sessionRunsDir(piAgentDir, ctx.sessionManager.getSessionId());
+		history.clear();
+		try {
+			ensureRunsDir(runsDir); // harden (and create) the session archive dir before restoring
+			for (const artifact of loadRunArtifacts(runsDir)) {
+				history.set(artifact.id, archivedRunOf(artifact));
+			}
+		} catch {
+			// Unusable archive dir (e.g. read-only agent dir): skip archiving this session.
+			runsDir = undefined;
+		}
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
@@ -747,6 +867,15 @@ export default function (pi: ExtensionAPI) {
 			]);
 			for (const run of active) {
 				if (!run.finished) run.process?.kill("SIGKILL");
+			}
+			if (active.some((run) => !run.finished)) {
+				// Give `close` a moment to land after SIGKILL; then settle the rest explicitly so
+				// every run still gets a terminal status, an artifact, and a resolved `done`.
+				await new Promise((resolve) => setTimeout(resolve, CLOSE_GRACE_MS));
+			}
+			// A late `close` after this is a no-op: finishRun's `finished` guard prevents double-finalizing.
+			finishUnresolvedRuns(active, (run) => finishRun(run, null, "SIGKILL"));
+			for (const run of active) {
 				if (run.tempDir) rmSync(run.tempDir, { recursive: true, force: true });
 			}
 		}
@@ -754,6 +883,8 @@ export default function (pi: ExtensionAPI) {
 		widgetTimer = undefined;
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
 		runs.clear();
+		history.clear();
+		runsDir = undefined;
 		latestCtx = undefined;
 	});
 }

@@ -11,9 +11,12 @@ Wabi adds one `subagent` tool. Each task runs in an isolated, one-shot `pi --mod
 - A compact widget shows agent, status, current tool, and elapsed time
 - `/subagents` or `Alt+S` opens the live transcript inspector; `s` stops a running child
 - Child process noise stays out of the parent model context; only the final answer is handed back
+- Failed runs hand back a bounded, structured summary — exit code, exit signal, stop reason, provider error, and whether output/stderr exist — never raw stderr or provider diagnostics
+- Two consecutive no-output failures open one shared circuit breaker across all agent roles: launches are refused and the parent is told to report degraded mode; at most one health probe runs after the cooldown
+- Every finished run is written to a durable per-session artifact (mode 0600 under a mode-0700 session dir) with the retained transcript and stderr, so postmortem and `/subagents` survive reload and resume
 - A `subagent-orchestration` skill teaches the parent when to delegate, which agent to choose, and when to use background mode
 
-Children inherit project context and skills, but not ambient extensions, prompt templates, or themes. Each one gets a private settings overlay that forces SSE for reliable one-shot streaming without changing the parent's transport. They are stopped when the parent session reloads, switches, or exits.
+Children inherit project context and skills, but not ambient extensions, prompt templates, or themes. Each child runs against the canonical agent directory (same `auth.json`, `models-store.json`, and settings as the parent), so pi's own file locks are shared and OAuth refreshes can never race through per-run copies. The old per-run overlay also force-set `transport: "sse"`; children now follow the parent's transport setting instead — the accepted tradeoff for sharing one canonical auth/models state. They are stopped when the parent session reloads, switches, or exits.
 
 ## Agents (`~/.pi/agent/agents/`)
 
@@ -57,7 +60,16 @@ Open with `/subagents` or `Alt+S`.
 - `s`, then `y`: stop a running child
 - `Esc`: close
 
-Completed runs remain inspectable for the current parent session; their widget row disappears after five seconds. Model-visible handoffs are capped at 8 KB total, while the inspector retains the full session transcript and shows per-run transcript bytes, handoff bytes, and isolation percentage.
+Completed runs remain inspectable for the current parent session; their widget row disappears after five seconds. After a reload or resume, runs from earlier in the same session are restored from the session's run archive and shown with an `archived` marker — metadata and the capped, retained transcript included.
+
+Model-visible handoffs are capped at 8 KB total and never contain stderr or provider diagnostics; the inspector retains the full session transcript and shows per-run transcript bytes, handoff bytes, and isolation percentage.
+
+## Run archive and failure behavior
+
+- Every finished run is persisted as `~/.pi/agent/wabi-runs/<session-id>/<run-id>.json` (directory mode 0700, files mode 0600, written atomically via a uniquely named exclusive temp file and rename — a pre-created symlink at the final path is replaced, never followed): run id, agent, task, status, timestamps, exit code, exit signal, stop reason, provider error presence, output/stderr presence, usage, the capped transcript, and retained stderr. Caps: transcript 4 MB total with 64 KB per entry (oldest entries dropped first) and at most 100,000 entries (newest retained), task and private error message 4 KB each, stderr 128 KB; serialized artifacts always stay within the 16 MB restore cap. These files are for local postmortem and `/subagents` inspection only — they are never fed to the parent model.
+- Restoring the archive skips symlinks, files over 16 MB (checked before reading), and corrupt or foreign files; at most the 100 most recent runs of a session are restored, oldest first.
+- Failure handoffs distinguish three outcomes: `completed`, failed with partial output, and failed before any output; each carries provider error presence, exit code, signal, stop reason, and output/stderr presence as booleans — raw provider diagnostics never cross the model boundary.
+- One shared circuit breaker (all agent roles) opens after two consecutive no-output failures and refuses launches until the 60 s cooldown elapses, then admits exactly one health probe. A probe success closes the circuit; a probe failure reopens it; a stopped probe releases the probe slot without counting. Completed runs and failed runs with output reset the failure count.
 
 ## Install
 
