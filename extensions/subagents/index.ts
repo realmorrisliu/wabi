@@ -13,16 +13,21 @@ import { Key, Text, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earen
 import { Type } from "typebox";
 import {
 	type AgentConfig,
+	type HandoffFields,
+	BACKGROUND_DELIVERY,
 	JsonlDecoder,
+	composeSystemPrompt,
 	contentText,
+	createChildAgentDir,
 	discoverAgents,
 	formatDuration,
+	formatHandoff,
+	isCompletedRun,
+	isolationPct,
 	isWriter,
-	truncateUtf8,
+	launchPolicy,
 } from "./lib.ts";
 
-const MAX_CHILDREN = 4;
-const HANDOFF_BYTES = 50 * 1024;
 const STDERR_BYTES = 128 * 1024;
 const COMPLETED_WIDGET_MS = 5_000;
 const FORCE_KILL_MS = 5_000;
@@ -60,7 +65,9 @@ interface RunRecord {
 	errorMessage?: string;
 	stderr: string;
 	finalText: string;
+	handoffBytes?: number;
 	transcript: TranscriptEntry[];
+	transcriptBytes: number;
 	liveText: Map<number, string>;
 	liveThinking: Map<number, string>;
 	liveToolResult?: string;
@@ -88,6 +95,9 @@ interface RunView {
 	startedAt: number;
 	endedAt?: number;
 	lastOutput?: string;
+	transcriptBytes?: number;
+	handoffBytes?: number;
+	isolationPct?: number;
 }
 
 interface SubagentDetails {
@@ -103,7 +113,7 @@ const SubagentParams = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Self-contained task to delegate" }),
 	background: Type.Optional(
-		Type.Boolean({ description: "Return immediately and hand the final result back as a follow-up" }),
+		Type.Boolean({ description: "Return immediately; read-only agents only, with the final result steered back before the parent's next model turn" }),
 	),
 });
 
@@ -145,6 +155,9 @@ function viewOf(run: RunRecord): RunView {
 		startedAt: run.startedAt,
 		endedAt: run.endedAt,
 		lastOutput: lastLine(lastOutput(run)) || undefined,
+		transcriptBytes: run.transcriptBytes,
+		handoffBytes: run.handoffBytes,
+		isolationPct: runIsolationPct(run),
 	};
 }
 
@@ -164,11 +177,37 @@ function statusIcon(status: RunStatus): string {
 	}
 }
 
-function runError(run: RunRecord): string {
-	return run.errorMessage || run.stderr.trim() || `child exited with status ${run.status}`;
+/** Bounded, model-visible handoff for a finished run. Only the agent's own error message and text output are included; provider diagnostics, stderr, and the transcript stay inspector-only (user-inspectable via /subagents). */
+function runHandoff(run: RunRecord): string {
+	const status: HandoffFields["status"] = run.status === "completed" ? "completed" : run.status === "failed" ? "failed" : "stopped";
+	const text = formatHandoff({
+		runId: run.id,
+		agent: run.agent.name,
+		status,
+		error: run.errorMessage,
+		output: status === "completed" ? run.finalText : lastOutput(run),
+	});
+	run.handoffBytes = Buffer.byteLength(text);
+	return text;
+}
+
+function runIsolationPct(run: RunRecord): number | undefined {
+	if (!run.handoffBytes || !run.transcriptBytes) return undefined;
+	return isolationPct(run.handoffBytes, run.transcriptBytes);
+}
+
+function formatBytes(bytes: number): string {
+	if (bytes < 1024) return `${bytes}B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 export default function (pi: ExtensionAPI) {
+	const piAgentDir = getAgentDir();
+	const agentDefinitionsDir = join(piAgentDir, "agents");
+	const agentSummary = discoverAgents(agentDefinitionsDir)
+		.map((agent) => `${agent.name}: ${agent.description}`)
+		.join("; ") || "none configured";
 	const runs = new Map<string, RunRecord>();
 	let sequence = 0;
 	let latestCtx: ExtensionContext | undefined;
@@ -248,7 +287,10 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function append(run: RunRecord, kind: TranscriptKind, text: string): void {
-		if (text) run.transcript.push({ kind, text, at: Date.now() });
+		if (text) {
+			run.transcriptBytes += Buffer.byteLength(text);
+			run.transcript.push({ kind, text, at: Date.now() });
+		}
 	}
 
 	function applyDecoded(run: RunRecord, decoded: { events: Record<string, any>[]; errors: string[] }): void {
@@ -289,6 +331,9 @@ export default function (pi: ExtensionAPI) {
 			if (message.model) run.model = String(message.model);
 			if (message.stopReason) run.lastStopReason = String(message.stopReason);
 			if (message.errorMessage) run.errorMessage = String(message.errorMessage);
+			for (const diagnostic of message.diagnostics ?? []) {
+				append(run, "system", `Provider diagnostic: ${safeJson(diagnostic)}`);
+			}
 			if (message.usage) {
 				run.usage.input += Number(message.usage.input ?? 0);
 				run.usage.output += Number(message.usage.output ?? 0);
@@ -329,36 +374,35 @@ export default function (pi: ExtensionAPI) {
 	function handoffBackground(run: RunRecord): void {
 		if (run.suppressHandoff || shuttingDown) return;
 		const success = run.status === "completed";
-		const output = truncateUtf8(success ? run.finalText || "(no text output)" : runError(run), HANDOFF_BYTES);
 		pi.sendMessage(
 			{
 				customType: COMPLETION_TYPE,
-				content: [
-					`Background subagent handoff`,
-					`run: ${run.id}`,
-					`agent: ${run.agent.name}`,
-					`status: ${run.status}`,
-					"",
-					output,
-				].join("\n"),
+				content: runHandoff(run),
 				display: true,
 				details: { run: viewOf(run), success } satisfies CompletionDetails,
 			},
-			{ deliverAs: "followUp", triggerTurn: true },
+			{ deliverAs: BACKGROUND_DELIVERY, triggerTurn: true },
 		);
 	}
 
 	function finishRun(run: RunRecord, exitCode: number | null): void {
 		if (run.finished) return;
 		applyDecoded(run, run.decoder.flush());
+		// Commit any streaming state as partial transcript entries before clearing it, so
+		// partial output reaches the failure handoff and counts toward transcriptBytes.
+		// On a normal message_end the live maps are already clear, so nothing duplicates.
+		for (const thinking of run.liveThinking.values()) append(run, "thinking", thinking);
+		for (const text of run.liveText.values()) append(run, "text", text);
+		if (run.liveToolResult) append(run, "tool-result", `${run.currentTool ?? "tool"} (partial)\n${run.liveToolResult}`);
 		run.finished = true;
 		run.endedAt = Date.now();
-		if (run.liveToolResult) append(run, "tool-result", `${run.currentTool ?? "tool"} (partial)\n${run.liveToolResult}`);
+		run.liveText.clear();
+		run.liveThinking.clear();
 		run.currentTool = undefined;
 		run.liveToolResult = undefined;
 
 		if (run.stopRequested) run.status = "stopped";
-		else if (exitCode === 0 && run.lastStopReason !== "error" && run.lastStopReason !== "aborted" && !run.errorMessage) run.status = "completed";
+		else if (isCompletedRun(exitCode, run.lastStopReason, run.errorMessage)) run.status = "completed";
 		else run.status = "failed";
 
 		if (run.status === "failed" && run.stderr.trim()) append(run, "system", run.stderr.trim());
@@ -394,7 +438,9 @@ export default function (pi: ExtensionAPI) {
 			startedAt: Date.now(),
 			stderr: "",
 			finalText: "",
+			handoffBytes: undefined,
 			transcript: [],
+			transcriptBytes: 0,
 			liveText: new Map(),
 			liveThinking: new Map(),
 			usage: { input: 0, output: 0, cost: 0 },
@@ -418,19 +464,19 @@ export default function (pi: ExtensionAPI) {
 			ctx.isProjectTrusted() ? "--approve" : "--no-approve",
 		];
 		if (agent.model) args.push("--model", agent.model);
+		if (agent.thinking) args.push("--thinking", agent.thinking);
 		if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
-		if (agent.systemPrompt.trim()) {
-			run.tempDir = mkdtempSync(join(tmpdir(), "wabi-"));
-			const promptFile = join(run.tempDir, "prompt.md");
-			writeFileSync(promptFile, agent.systemPrompt, { encoding: "utf8", mode: 0o600 });
-			args.push("--append-system-prompt", promptFile);
-		}
-		args.push(`Task: ${task}`);
 
 		try {
+			run.tempDir = mkdtempSync(join(tmpdir(), "wabi-"));
+			const childAgentDir = createChildAgentDir(piAgentDir, run.tempDir);
+			const promptFile = join(run.tempDir, "prompt.md");
+			writeFileSync(promptFile, composeSystemPrompt(agent.systemPrompt), { encoding: "utf8", mode: 0o600 });
+			args.push("--append-system-prompt", promptFile);
+			args.push(`Task: ${task}`);
 			const child = spawn("pi", args, {
 				cwd: ctx.cwd,
-				env: process.env,
+				env: { ...process.env, PI_CODING_AGENT_DIR: childAgentDir },
 				stdio: ["ignore", "pipe", "pipe"],
 			});
 			run.process = child;
@@ -548,6 +594,10 @@ export default function (pi: ExtensionAPI) {
 						}
 						lines.push(theme.fg("dim", "─".repeat(Math.max(1, width))), theme.fg("muted", `Task: ${current.task}`));
 
+						const metrics = current.transcriptBytes
+							? `transcript ${formatBytes(current.transcriptBytes)} · handoff ${current.handoffBytes ? formatBytes(current.handoffBytes) : "—"} · isolation ${runIsolationPct(current) ?? "—"}%`
+							: "";
+						if (metrics) lines.push(theme.fg("dim", metrics));
 						const body = transcriptLines(current, width, showThinking, theme);
 						const pageSize = Math.max(5, (process.stdout.rows ?? 30) - Math.min(all.length, 5) - 8);
 						const maxScroll = Math.max(0, body.length - pageSize);
@@ -591,38 +641,48 @@ export default function (pi: ExtensionAPI) {
 		const run = details?.run;
 		const icon = details?.success ? theme.fg("success", "✓") : theme.fg("error", "✗");
 		const label = run ? `${run.id} ${run.status}` : "subagent handoff";
-		return new Text(`${icon} ${theme.fg("muted", label)}${options.expanded ? " — full result delivered to the parent agent" : ""}`, options.outputPad, 0);
+		return new Text(`${icon} ${theme.fg("muted", label)}${options.expanded ? " — result steered to the parent before its next turn" : ""}`, options.outputPad, 0);
 	});
 
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent (wabi)",
-		description: "Delegate one task to a configured child agent. Foreground runs stream progress; background runs return immediately and hand their final answer back as a follow-up. Use multiple tool calls for parallel work. At most four children may run, and only one write-capable child may run at a time.",
+		description: `Delegate substantial independent work to configured child agents (${agentSummary}). Foreground subagent runs stream progress and block until done; background runs return immediately and accept read-only agents only, with the final result steered back before the parent's next model turn. Issue multiple sibling subagent calls in one message for independent blocking work. At most four subagents may run, and only one write-capable subagent at a time; write-capable subagents (worker, creative-worker) must run in the foreground.`,
+		promptSnippet: "Delegate substantial independent research, implementation, creative work, or review to isolated child agents",
+		promptGuidelines: [
+			"Use subagent for non-atomic implementation: delegate to the worker subagent whenever a task needs further exploration, touches multiple files, has an uncertain path, or needs a test/debug loop; keep in the parent only known, localized one-file atomic edits — and only when the exact file is known, one edit suffices with no exploration or test/debug loop, and no risk review is triggered.",
+			"Issue sibling foreground subagent calls in one assistant message for independent blocking work so they run in parallel; do not duplicate delegated scope across subagents.",
+			"Use subagent in background only for read-only, nonblocking work (scout, reviewer); write-capable subagents (worker, creative-worker) must run in the foreground.",
+			"Never poll or sleep for a subagent; never answer before required subagent runs finish — await each result, then integrate and verify it.",
+			"After risky subagent changes, delegate an independent review to the reviewer subagent (the subagent-orchestration skill lists the risk classes); verify the integrated result in the parent without repeating the worker's exploration.",
+			"Consult the subagent-orchestration skill for detailed routing and agent selection.",
+		],
 		parameters: SubagentParams,
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			latestCtx = ctx;
-			const agents = discoverAgents(join(getAgentDir(), "agents"));
+			const agents = discoverAgents(agentDefinitionsDir);
 			const agent = agents.find((candidate) => candidate.name === params.agent);
 			if (!agent) throw new Error(`Unknown agent "${params.agent}". Available: ${agents.map((candidate) => candidate.name).join(", ") || "none"}`);
 			if (!params.task.trim()) throw new Error("Subagent task must not be empty.");
-
-			const active = [...runs.values()].filter(isActive);
-			if (active.length >= MAX_CHILDREN) throw new Error(`At most ${MAX_CHILDREN} subagents may run concurrently.`);
-			if (isWriter(agent)) {
-				const writer = active.find((run) => run.writer);
-				if (writer) throw new Error(`Write-capable subagent ${writer.id} is already running.`);
-			}
 
 			const background = params.background ?? false;
 			if (background && ctx.mode !== "tui" && ctx.mode !== "rpc") {
 				throw new Error("Background subagents require an interactive or RPC parent session.");
 			}
+			const active = [...runs.values()].filter(isActive);
+			const policyError = launchPolicy(agent, {
+				background,
+				activeCount: active.length,
+				activeWriterCount: active.filter((run) => run.writer).length,
+			});
+			if (policyError) throw new Error(policyError);
+
 			const run = launchRun(agent, params.task.trim(), background, ctx, background ? undefined : onUpdate);
 
 			if (background) {
 				return {
-					content: [{ type: "text", text: `Started ${run.id} in the background. Its final answer will arrive as a follow-up.` }],
+					content: [{ type: "text", text: `Started ${run.id} in the background (read-only). Its final result will be steered back before your next turn.` }],
 					details: { run: viewOf(run) },
 				};
 			}
@@ -631,9 +691,9 @@ export default function (pi: ExtensionAPI) {
 			if (signal?.aborted) abort();
 			else signal?.addEventListener("abort", abort, { once: true });
 			await run.done.finally(() => signal?.removeEventListener("abort", abort));
-			if (run.status !== "completed") throw new Error(`${run.id} ${run.status}: ${runError(run)}`);
+			if (run.status !== "completed") throw new Error(runHandoff(run));
 			return {
-				content: [{ type: "text", text: truncateUtf8(run.finalText || "(no text output)", HANDOFF_BYTES) }],
+				content: [{ type: "text", text: runHandoff(run) }],
 				details: { run: viewOf(run) },
 			};
 		},
