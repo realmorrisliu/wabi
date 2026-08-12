@@ -93,6 +93,20 @@ export function isWriter(agent: AgentConfig): boolean {
 	return !agent.tools || agent.tools.some((tool) => tool === "edit" || tool === "write");
 }
 
+/** Best-effort removal of a run's temp dir. Never throws: a cleanup failure must not block the handoff, artifact, circuit update, or settle. On failure the error goes to `onError` for bounded local recording (transcript/inspector) only. */
+export function removeTempDirBestEffort(tempDir: string | undefined, onError?: (error: unknown) => void): void {
+	if (!tempDir) return;
+	try {
+		rmSync(tempDir, { recursive: true, force: true });
+	} catch (error) {
+		try {
+			onError?.(error);
+		} catch {
+			// The cleanup callback itself must never throw either: run settlement continues regardless.
+		}
+	}
+}
+
 export function contentText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -166,8 +180,8 @@ export const HANDOFF_CONTRACT = [
 	"",
 	"Structure the final response as exactly four labeled sections:",
 	"- Outcome: what changed or what you found, in 1-3 sentences.",
-	"- Evidence: files touched (with a one-line reason each), commands run, and their results.",
-	"- Risks: anything unverified, partial, or likely to break.",
+	"- Evidence: the first item is Baseline — for read-only runs (scout, reviewer) the injected HEAD sha, as-of timestamp, and workspace fingerprint from your task; for write-capable runs your starting HEAD sha (or the working directory when not a git worktree). Report a fingerprint only when your environment provided one — never fabricate it or go looking for it. For dynamic resources include the inspected update markers (state, updatedAt, head SHA, run id). Then each claim followed by its smallest supporting evidence: resource id, path + line, or command result. End with the list of inspected resources (ids / SHAs / timestamps) so the parent can delta-check exactly those.",
+	"- Risks: the first item is Needs parent verification — only narrow items you could not complete: permissions, state that moved, clone-unrepresentable state. Never re-doable exploration. Then anything unverified, partial, or likely to break.",
 	"- Next: the smallest sensible follow-up, if any.",
 	"",
 	"Target at most 6KB (~1000-1500 tokens). Omit exploration narrative, raw logs, and discarded approaches. If you hit a blocker, say so plainly in Outcome/Risks instead of padding.",

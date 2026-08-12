@@ -1,6 +1,6 @@
 // check.ts — self-check for wabi's pure logic. Run: bun check.ts
 
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -39,6 +39,7 @@ import {
 	MAX_TRANSCRIPT_ENTRIES,
 	parseFrontmatter,
 	parseRunArtifact,
+	removeTempDirBestEffort,
 	runArtifactPath,
 	serializeRunArtifact,
 	sessionRunsDir,
@@ -395,6 +396,29 @@ check("handoff contract: appended to every child system prompt", composeSystemPr
 check("handoff contract: requires Outcome/Evidence/Risks/Next", ["Outcome", "Evidence", "Risks", "Next"].every((section) => HANDOFF_CONTRACT.includes(section)));
 check("handoff contract: under 6KB", Buffer.byteLength(HANDOFF_CONTRACT) <= 6 * 1024);
 check("handoff contract: final response is the only model-visible result", HANDOFF_CONTRACT.includes("ONLY model-visible result"));
+check("handoff contract: read-only runs report the injected baseline, writers never fabricate a fingerprint", HANDOFF_CONTRACT.includes("injected HEAD sha") && HANDOFF_CONTRACT.includes("never fabricate") && HANDOFF_CONTRACT.includes("starting HEAD"));
+
+// Best-effort temp dir removal: cleanup must never throw or block run settlement;
+// a failure is reported through onError for bounded local recording only.
+check("removeTempDirBestEffort: removes a real temp dir", (() => {
+	const dir = mkdtempSync(join(tmpdir(), "wabi-cleanup-"));
+	writeFileSync(join(dir, "x"), "x");
+	removeTempDirBestEffort(dir);
+	return !existsSync(dir);
+})());
+check("removeTempDirBestEffort: a failing removal never throws and reports via onError", (() => {
+	let reported = false;
+	removeTempDirBestEffort("bad\u0000path", (error) => { reported = Boolean(error); });
+	return reported;
+})());
+check("removeTempDirBestEffort: no-op for undefined, onError never called", (() => {
+	removeTempDirBestEffort(undefined, () => { throw new Error("must not be called"); });
+	return true;
+})());
+check("removeTempDirBestEffort: a throwing onError callback never propagates", (() => {
+	removeTempDirBestEffort("bad\u0000path", () => { throw new Error("onError boom"); });
+	return true;
+})());
 
 const md = `---
 name: test-agent

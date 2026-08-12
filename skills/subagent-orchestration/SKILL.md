@@ -22,6 +22,24 @@ Delegate only when isolation or parallelism pays for the handoff. Keep small tas
 - Background: read-only, nonblocking work only (`scout`, `reviewer`). Write-capable subagents are rejected in the background; their final result is steered back before your next turn.
 - At most four subagents may run, and only one write-capable at a time.
 
+## Evidence ownership: one reader per piece of evidence
+
+A subagent run exists to produce evidence the parent lacks. Once a scope is delegated, the child owns its exploration and the parent consumes only the child's compressed evidence plus a bounded freshness delta.
+
+- **Delegation gate.** If you already hold enough evidence to answer, do not delegate. Before delegating a scope, collect only the routing inventory needed to split and dispatch work: issue id/title/state/labels/`updatedAt`, repo HEAD, and the baseline below. Do not pre-read full bodies, comments, timelines, PR diffs, or OpenSpec documents for the delegated scope — that reading is the child's job.
+- **Owned scope.** Every delegated task must state: **objective** (the question the run must answer); **owned resources / scope** (the paths, issues, PRs, or evidence the child owns); **out of scope** (what the child must not read); **baseline / as-of** (the SHA and timestamp to work against); **expected verdict / output** (the shape of the answer); **stopping condition** (when the child may stop).
+- **Ownership transfer.** Delegating a scope transfers exploration ownership: you do not run the same exploration in parallel before the handoff, and the child does not step outside its scope to patch a sibling's gaps — it reports them instead.
+- **Sibling scopes** default to non-overlapping. Overlap exists only when the task explicitly asks for voting or cross-check of the same evidence.
+
+## Integrate with bounded verification, never re-exploration
+
+- Integrate the worker's result yourself and verify the integrated state — do not repeat the worker's exploration.
+- Never poll or sleep for a subagent; never answer before required subagent runs finish.
+- Do not duplicate delegated scope across subagents.
+- After a handoff (or a batch of sibling handoffs), in order: check sibling baselines are consistent (same SHA / as-of where the task required it); run **one batched freshness delta** (HEAD/status fingerprint, issue/PR state + `updatedAt`, check status) for the inspected resources only; if nothing changed, **adopt the handoff**; if a resource changed, re-review only the affected finding(s), not the whole scope; each Needs-parent-verification item gets exactly one narrow check; sibling conflicts get only the **tie-break** check; each shared **canonical** gate (e.g. "this symbol still exists", "this invariant holds") runs once per invariant, not once per child; before close/reopen/merge, verify only the **predicate** that decides the action (e.g. the issue is still open), not a full re-audit.
+- Verification is a yes/no or freshness check on a single claim ("state is X?", "file still has line L?", "SHA still H?"). Re-exploration — re-reading full bodies/comments/timelines, broad greps, or rebuilding the child's causal chain — is prohibited.
+- A handoff that lacks key evidence is an **incomplete handoff**: ask for one bounded follow-up or report uncertainty. Never silently take over the whole scope.
+
 ## Review risky changes
 
 Delegate an independent review to `reviewer` after any change in one of these risk classes:
@@ -43,12 +61,6 @@ Delegate an independent review to `reviewer` after any change in one of these ri
 - A failed reviewer run is **not a review**: it contributes no review feedback, so never treat it as one; re-review only after the underlying failure is resolved.
 - After a second failure of a non-atomic multi-file worker task, **do not take the task over in the parent** — the parent may only handle a residual that is itself atomic; otherwise report the blocker and replan.
 
-## Integrate and hand off
-
-- Integrate the worker's result yourself and verify the integrated state — do not repeat the worker's exploration.
-- Never poll or sleep for a subagent; never answer before required subagent runs finish.
-- Do not duplicate delegated scope across subagents.
-
 ## Delegate well
 
-Give the child a self-contained task with the working directory, scope, constraints, expected output, and whether changes are allowed. Expect the child's handoff to be Outcome/Evidence/Risks/Next; verify its evidence rather than re-exploring.
+Give the child a self-contained task with the working directory, scope, constraints, expected output, and whether changes are allowed. Expect the child's handoff to be Outcome/Evidence/Risks/Next with a Baseline (HEAD sha, as-of, fingerprint, inspected update markers) as the first Evidence item; verify its evidence rather than re-exploring.

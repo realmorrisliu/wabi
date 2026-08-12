@@ -3,7 +3,7 @@
 // to the parent model.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -11,6 +11,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Key, Text, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { activeOwnerTokens, createReadonlyRunDir, sweepReadonlyRuns } from "./cleanup.ts";
+import { resolveChildCwd, type CloneBaseline } from "./clone.ts";
 import {
 	type AgentConfig,
 	type ArchivedRun,
@@ -34,6 +36,7 @@ import {
 	isWriter,
 	launchPolicy,
 	loadRunArtifacts,
+	removeTempDirBestEffort,
 	sessionRunsDir,
 	writeRunArtifact,
 } from "./lib.ts";
@@ -47,6 +50,8 @@ const ERROR_FALLBACK_MS = 1_000;
 const CLOSE_GRACE_MS = 500;
 const WIDGET_KEY = "wabi-subagents";
 const COMPLETION_TYPE = "wabi-subagent-complete";
+
+/** Owner tokens of live extension instances in this process, kept in a process-global registry (a `Symbol.for`-keyed set on globalThis, see cleanup.ts) so every copy of this module in the same JS realm — duplicate/aliased extension paths, reloads — shares one set. The startup stale-run sweep skips any run whose marker token is registered here, and deletes runs of previous instances of this same process (reloads, session switches) that are not — a pid + identity check alone cannot see a reload inside the same process. One process can hold several extension instances at once (pi re-invokes the factory on every reload and session switch, and duplicate/aliased extension paths load twice), so each instance registers its own token when it loads and deregisters it in its own session_shutdown — never in another instance's load, never clearing other tokens. pi awaits an instance's session_shutdown before the next instance loads, so a replaced instance's token is gone by the next session_start sweep (its leftover dirs become reclaimable via the same-process rule) while every live instance's runs stay protected. */
 
 type RunStatus = "starting" | "running" | "stopping" | "completed" | "failed" | "stopped";
 type TranscriptKind = "text" | "thinking" | "tool" | "tool-result" | "system";
@@ -94,6 +99,10 @@ interface RunRecord {
 	decoder: JsonlDecoder;
 	process?: ChildProcess;
 	tempDir?: string;
+	/** Cancellation for clone preparation: stopRun aborts it so prep terminates (killing the current git child) and settles as stopped. */
+	abortPrep?: AbortController;
+	/** Snapshot baseline for read-only runs (scout, reviewer) that execute in a per-run disposable clone. */
+	baseline?: CloneBaseline;
 	stopRequested?: string;
 	suppressHandoff: boolean;
 	finished: boolean;
@@ -204,6 +213,16 @@ function statusIcon(status: RunStatus): string {
 	}
 }
 
+/** Baseline block appended to a read-only child's task so its handoff can report Baseline accurately. */
+function baselinePrompt(baseline: CloneBaseline): string {
+	return [
+		`Read-only run environment: you are working in a per-run disposable clone of the parent workspace (detached HEAD ${baseline.head}, branch ${baseline.branch}, as-of ${new Date(baseline.asOf).toISOString()}, fingerprint ${baseline.fingerprint}).`,
+		"The parent's staged, unstaged, and non-ignored untracked state was copied into this clone; its refs, stash, config, index, and working tree are independent of the parent's and are discarded when the run ends.",
+		"Stay read-only: do not fetch, checkout, reset, or stash. If you ignore this, only this disposable clone is damaged, never the parent workspace.",
+		"Report this Baseline (HEAD sha, as-of, fingerprint) as the first Evidence item, followed by inspected update markers for dynamic resources.",
+	].join("\n");
+}
+
 /** Bounded, model-visible handoff for a finished run. Only the agent's own text output and failure metadata (provider error presence, exit code, signal, stop reason, output/stderr presence) are included; raw provider diagnostics, stderr, and the transcript stay inspector-only (user-inspectable via /subagents). */
 function runHandoff(run: RunRecord): string {
 	if (run.handoffText) return run.handoffText;
@@ -251,8 +270,9 @@ export default function (pi: ExtensionAPI) {
 	const circuit = new CircuitBreaker();
 	let runsDir: string | undefined;
 	let sequence = 0;
-	/** Fresh per extension instance (every process start or /reload), so run ids never collide across resets. */
+	/** Fresh per extension instance (every process start, /reload, or session switch), so run ids never collide across resets. */
 	const instanceToken = Math.random().toString(36).slice(2, 10);
+	activeOwnerTokens().add(instanceToken);
 	let latestCtx: ExtensionContext | undefined;
 	let widgetTimer: ReturnType<typeof setInterval> | undefined;
 	let inspectorOpen = false;
@@ -496,7 +516,10 @@ export default function (pi: ExtensionAPI) {
 		if (run.updateTimer) clearTimeout(run.updateTimer);
 		if (run.killTimer) clearTimeout(run.killTimer);
 		if (run.fallbackTimer) clearTimeout(run.fallbackTimer);
-		if (run.tempDir) rmSync(run.tempDir, { recursive: true, force: true });
+		// Best-effort temp dir removal: a cleanup failure is recorded locally (bounded) and never blocks the handoff, artifact, circuit update, emit, or settle.
+		removeTempDirBestEffort(run.tempDir, (error) => {
+			append(run, "system", `Run temp dir cleanup failed (left in place): ${String(error).slice(0, 200)}`);
+		});
 		runHandoff(run); // cache the model-visible handoff so handoffBytes lands in the artifact
 		recordCircuitResult(run);
 		persistRun(run);
@@ -537,14 +560,33 @@ export default function (pi: ExtensionAPI) {
 			hasStderr: false,
 			usage: { input: 0, output: 0, cost: 0 },
 			decoder: new JsonlDecoder(),
-			suppressHandoff: false,
+			// Background runs suppress steering at launch: the tool call has not yet confirmed the
+			// child truly started, so a prep failure/stop must be delivered once, as the tool error
+			// thrown by execute — never also as a steered message. execute lifts this after startRun
+			// proves the child is up; stopRun/session_shutdown re-assert it for their own semantics.
+			suppressHandoff: true,
 			finished: false,
 			done,
 			resolveDone,
 			onUpdate,
+			abortPrep: new AbortController(),
 		};
 		runs.set(run.id, run);
+		emitUpdate(run, true);
+		ensureWidget();
+		return run;
+	}
 
+	/**
+	 * Async launch pipeline: temp dir, clone preparation for read-only agents,
+	 * then the child spawn. Runs in parallel with the caller; cancellation is
+	 * wired through `run.abortPrep` (stopRun aborts it, so stop/reload during
+	 * preparation terminates it and settles the run as stopped). Any
+	 * preparation error fails the run closed with the bounded handoff — never
+	 * a fallback to the shared cwd, never raw git stderr in the handoff.
+	 */
+	async function startRun(run: RunRecord, task: string, ctx: ExtensionContext): Promise<void> {
+		const agent = run.agent;
 		const args = [
 			"--mode",
 			"json",
@@ -560,13 +602,41 @@ export default function (pi: ExtensionAPI) {
 		if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
 
 		try {
-			run.tempDir = mkdtempSync(join(tmpdir(), "wabi-"));
+			if (run.stopRequested) {
+				finishRun(run, null, null); // stopped before preparation started
+				return;
+			}
+			if (run.writer) {
+				run.tempDir = mkdtempSync(join(tmpdir(), "wabi-")); // legacy per-run prompt temp dir; never swept
+			} else {
+				// Read-only runs live in a dedicated root with an owner marker so a later
+				// startup sweep can reclaim dirs left by kill -9/crashes or failed cleanups.
+				// The marker is written before clone preparation begins; any failure here
+				// fails the run closed and the dir is removed by the existing cleanup.
+				run.tempDir = createReadonlyRunDir(run.id, instanceToken);
+			}
 			const promptFile = join(run.tempDir, "prompt.md");
 			writeFileSync(promptFile, composeSystemPrompt(agent.systemPrompt), { encoding: "utf8", mode: 0o600 });
 			args.push("--append-system-prompt", promptFile);
-			args.push(`Task: ${task}`);
+			// Read-only agents (scout, reviewer) run in a per-run disposable clone: their git
+			// state is independent of the parent's and the clone inherits the temp dir's
+			// cleanup. Preparation is asynchronous and cancelable (stop/reload/tool abort
+			// terminate it under one shared total deadline); failure throws and fails the run
+			// closed — never fall back to the shared cwd. Write-capable agents keep the
+			// shared `ctx.cwd` unchanged.
+			let childCwd = ctx.cwd;
+			if (!run.writer) {
+				const workspace = await resolveChildCwd(agent, ctx.cwd, run.tempDir, run.abortPrep?.signal);
+				childCwd = workspace.cwd;
+				run.baseline = workspace.baseline;
+			}
+			if (run.stopRequested) {
+				finishRun(run, null, null); // stopped while preparing; do not spawn
+				return;
+			}
+			args.push(run.baseline ? `Task: ${task}\n\n${baselinePrompt(run.baseline)}` : `Task: ${task}`);
 			const child = spawn("pi", args, {
-				cwd: ctx.cwd,
+				cwd: childCwd,
 				env: childEnv(), // canonical agent dir: children share the parent's locks on auth.json/models-store.json
 				stdio: ["ignore", "pipe", "pipe"],
 			});
@@ -590,14 +660,18 @@ export default function (pi: ExtensionAPI) {
 				emitUpdate(run);
 			});
 			child.on("close", (code, signal) => finishRun(run, code, signal));
+			emitUpdate(run, true);
+			ensureWidget();
 		} catch (error) {
-			run.errorMessage = String(error);
+			// An aborted preparation (stop/reload/tool abort, or the shared prep deadline)
+			// settles as stopped — never an infrastructure empty failure, never providerError.
+			if (error instanceof Error && error.name === "AbortError") {
+				if (!run.stopRequested) run.stopRequested = "clone preparation deadline exceeded";
+			} else {
+				run.errorMessage = String(error);
+			}
 			finishRun(run, null, null);
 		}
-
-		emitUpdate(run, true);
-		ensureWidget();
-		return run;
 	}
 
 	function stopRun(run: RunRecord, reason: string): void {
@@ -605,6 +679,7 @@ export default function (pi: ExtensionAPI) {
 		run.stopRequested = reason;
 		run.suppressHandoff = true;
 		run.status = "stopping";
+		run.abortPrep?.abort(); // terminate clone preparation (kills the current git child) when the child does not exist yet
 		run.process?.kill("SIGTERM");
 		run.killTimer = setTimeout(() => {
 			if (!run.finished) run.process?.kill("SIGKILL");
@@ -760,6 +835,8 @@ export default function (pi: ExtensionAPI) {
 			"A failed subagent reviewer run is not a review: it provides no review feedback, so never treat it as one; re-review only after the underlying failure is resolved.",
 			"After two failures of a non-atomic multi-file worker subagent task, do not take the task over in the parent: keep in the parent only a residual that is itself atomic, otherwise report the blocker and replan.",
 			"After risky subagent changes, delegate an independent review to the reviewer subagent (the subagent-orchestration skill lists the risk classes); verify the integrated result in the parent without repeating the worker's exploration.",
+			"Scout and reviewer subagent runs execute in a per-run disposable clone of the parent checkout (detached HEAD at launch, snapshotting staged, unstaged, and non-ignored untracked state); a failed clone preparation fails the run closed — never fall back to the shared working directory, never retry the same launch blindly.",
+			"Delegating a scope transfers evidence ownership to the subagent child: before delegating, collect only routing inventory (ids, titles, states, labels, updatedAt, repo HEAD); after the handoff, verify with a batched freshness delta and narrow checks — do not re-read full evidence the child already summarized (see the subagent-orchestration skill).",
 			"Consult the subagent-orchestration skill for detailed routing and agent selection.",
 		],
 		parameters: SubagentParams,
@@ -787,18 +864,36 @@ export default function (pi: ExtensionAPI) {
 			// runs first, so a half-open probe can only be consumed by an actual launch.
 			if (!circuit.allowLaunch()) throw new Error(circuitBlockedMessage(agent.name));
 
-			const run = launchRun(agent, params.task.trim(), background, ctx, background ? undefined : onUpdate);
+			const task = params.task.trim();
+			const run = launchRun(agent, task, background, ctx, background ? undefined : onUpdate);
+
+			// Foreground: wire the tool's abort signal BEFORE preparation starts, so an
+			// abort during clone preparation terminates it and settles the run as stopped.
+			// Background runs never wire the signal: the tool call ending must not stop them.
+			const abort = () => stopRun(run, "parent tool aborted");
+			if (!background) {
+				if (signal?.aborted) abort();
+				else signal?.addEventListener("abort", abort, { once: true });
+			}
+			// Background still returns only after preparation completes and the child is
+			// spawned (prep is async now, but the tool call waits for it, as before).
+			await startRun(run, task, ctx);
 
 			if (background) {
+				// A preparation failure (or a stop during preparation) settles the run
+				// without spawning: surface the bounded handoff, never a Started result.
+				// Suppression stays on in that case, so finishRun's handoffBackground is a
+				// no-op and the throw below is the single delivery.
+				if (!isActive(run)) throw new Error(runHandoff(run));
+				// The child is genuinely up now: lift the launch-time suppression so its later
+				// completion (success or failure) steers back normally via handoffBackground.
+				run.suppressHandoff = false;
 				return {
 					content: [{ type: "text", text: `Started ${run.id} in the background (read-only). Its final result will be steered back before your next turn.` }],
 					details: { run: viewOf(run) },
 				};
 			}
 
-			const abort = () => stopRun(run, "parent tool aborted");
-			if (signal?.aborted) abort();
-			else signal?.addEventListener("abort", abort, { once: true });
 			await run.done.finally(() => signal?.removeEventListener("abort", abort));
 			if (run.status !== "completed") throw new Error(runHandoff(run));
 			return {
@@ -851,9 +946,31 @@ export default function (pi: ExtensionAPI) {
 			// Unusable archive dir (e.g. read-only agent dir): skip archiving this session.
 			runsDir = undefined;
 		}
+
+		// One startup stale-run sweep per session start: reclaim dedicated read-only
+		// run dirs left by crashes/kill -9 or previous failed cleanups. Never blocks
+		// loading or the session; failures surface as a UI warning plus a local log
+		// line only. Successful cleanups stay silent (log line only).
+		try {
+			const swept = sweepReadonlyRuns(activeOwnerTokens());
+			if (swept.errors > 0) {
+				console.error(`wabi: readonly-run sweep recorded ${swept.errors} error(s); removed ${swept.removed} stale run dir(s)`);
+				ctx.ui.notify?.("wabi: stale read-only run cleanup had errors; see logs", "warning");
+			} else if (swept.removed > 0) {
+				console.log(`wabi: startup sweep removed ${swept.removed} stale read-only run dir(s)`);
+			}
+		} catch (error) {
+			console.error(`wabi: readonly-run sweep failed: ${String(error)}`);
+			ctx.ui.notify?.("wabi: stale read-only run cleanup failed; see logs", "warning");
+		}
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
+		// First thing: this instance's runs are about to stop, so its token must stop
+		// protecting them. A replaced instance's leftover run dirs are then reclaimable
+		// by the next session_start sweep (same pid, token no longer registered), and a
+		// throwing handler below cannot leave a stale token registered.
+		activeOwnerTokens().delete(instanceToken);
 		shuttingDown = true;
 		const active = [...runs.values()].filter(isActive);
 		for (const run of active) {
@@ -874,10 +991,8 @@ export default function (pi: ExtensionAPI) {
 				await new Promise((resolve) => setTimeout(resolve, CLOSE_GRACE_MS));
 			}
 			// A late `close` after this is a no-op: finishRun's `finished` guard prevents double-finalizing.
+			// (finishRun already removed each run's temp dir best-effort; the duplicate shutdown rm was dropped.)
 			finishUnresolvedRuns(active, (run) => finishRun(run, null, "SIGKILL"));
-			for (const run of active) {
-				if (run.tempDir) rmSync(run.tempDir, { recursive: true, force: true });
-			}
 		}
 		if (widgetTimer) clearInterval(widgetTimer);
 		widgetTimer = undefined;

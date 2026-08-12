@@ -4,7 +4,7 @@ Personal pi extension pack — small, observable subagents following 大道至�
 
 ## What it is
 
-Wabi adds one `subagent` tool. Each task runs in an isolated, one-shot `pi --mode json` child process while the parent keeps the useful parts visible:
+Wabi adds one `subagent` tool. Each task runs in a separate, one-shot `pi --mode json` child process while the parent keeps the useful parts visible. Write-capable children (worker, creative-worker) share the parent's working directory; read-only agents (scout, reviewer) run in a per-run disposable local clone, so their Git workspace mutations are confined to that clone — read-only by confinement, not by enforcement (a child can still write outside the clone via absolute paths or reach the network; this is not a security boundary). See [Design](#design).
 
 - Foreground runs stream progress and block until the result is ready
 - Background runs return immediately and are read-only only; the final result is steered back before the parent's next model turn
@@ -16,7 +16,14 @@ Wabi adds one `subagent` tool. Each task runs in an isolated, one-shot `pi --mod
 - Every finished run is written to a durable per-session artifact (mode 0600 under a mode-0700 session dir) with the retained transcript and stderr, so postmortem and `/subagents` survive reload and resume
 - A `subagent-orchestration` skill teaches the parent when to delegate, which agent to choose, and when to use background mode
 
-Children inherit project context and skills, but not ambient extensions, prompt templates, or themes. Each child runs against the canonical agent directory (same `auth.json`, `models-store.json`, and settings as the parent), so pi's own file locks are shared and OAuth refreshes can never race through per-run copies. The old per-run overlay also force-set `transport: "sse"`; children now follow the parent's transport setting instead — the accepted tradeoff for sharing one canonical auth/models state. They are stopped when the parent session reloads, switches, or exits.
+Children inherit project context and skills, but not ambient extensions, prompt templates, or themes. Write-capable children also inherit the parent's working directory (`ctx.cwd`) — a shared Git checkout. Read-only children (scout, reviewer) instead work against a per-run disposable local clone of the parent checkout (created with `git clone --no-local --no-checkout` — a full object copy with no hardlinks and no alternates from the source, verified; detached HEAD at launch, reproducing staged, unstaged, and non-ignored untracked state), so their git operations cannot touch the parent's refs, stash, index, or working tree — and no shared ref locks remain. Clone preparation is asynchronous and cancelable (stop/reload/tool abort terminate it under one shared total deadline, killing the current git child), and untracked-file fingerprinting/copying is chunked with abort checks and a total byte cap. Each child runs against the canonical agent directory (same `auth.json`, `models-store.json`, and settings as the parent), so pi's own file locks are shared and OAuth refreshes can never race through per-run copies. The old per-run overlay also force-set `transport: "sse"`; children now follow the parent's transport setting instead — the accepted tradeoff for sharing one canonical auth/models state. They are stopped when the parent session reloads, switches, or exits.
+
+## Design
+
+[`docs/read-only-subagent-runs.md`](docs/read-only-subagent-runs.md) is the design record and current-behavior reference for read-only subagent runs — **implemented**. It has two equal halves:
+
+- **Execution ownership (isolation):** scout and reviewer runs execute in a per-run disposable local clone created from the parent worktree at launch (`extensions/subagents/clone.ts`): a full object copy via `git clone --no-local --no-checkout` (no hardlinks, no alternates — verified, so alternate-backed sources still yield independent clones), detached HEAD at the parent's launch HEAD, staged changes applied into the clone's index and worktree together, unstaged changes into the worktree only, non-ignored untracked files copied (ignored files never), and the child's cwd mapped to the matching subdirectory. The clone's refs, stash, config, index, and working tree are fully independent of the parent's; it lives inside a per-run dir under the dedicated `$TMPDIR/wabi-readonly-runs/` root and is deleted best-effort on every terminal path (a failed cleanup is recorded in the local transcript and never blocks the run's handoff). Each run dir carries an owner marker (pid + instance token + process start time + runId), and once per session start a stale sweep reclaims dirs left by kill -9/crashes or failed cleanups: dead pids and PID-reuse mismatches delete immediately (POSIX identity via `ps -o lstart=`; a live but unverifiable pid — Windows — is conservatively kept), and dirs with missing/corrupt markers are only deleted past a 24 h mtime fallback. Preparation is asynchronous and cancelable — stop/reload/tool abort terminate it under one shared total deadline, and untracked fingerprinting/copying is chunked with a total byte cap. Clone preparation fails the run closed — no fallback to the shared cwd, no retry, no auto-repair — and a capture-time fingerprint (branch, HEAD, staged/unstaged binary diffs, untracked paths+content, `refs/stash`) computed before and after materialization makes an inconsistent snapshot fail instead of silently diverging. A parent change after capture does not fail the run; it makes the result stale against its recorded Baseline, which the child reports as the first Evidence item. Submodules are not copied (deferred: a submodule pointer change fails closed), and the deliberately invalid per-clone `file://` push URL on the clone's remotes is a speed bump for policy-following children, not a security boundary — as is the clone itself: a child can still escape via absolute paths or the network.
+- **Evidence ownership (non-duplication):** a prompt/skill contract — the delegation gate (routing inventory only, no pre-reading), owned scope (objective / scope / out of scope / baseline-as-of / expected verdict / stopping condition), ownership transfer (the parent does not re-explore in parallel, siblings default to disjoint scopes), and bounded parent integration (one batched freshness delta, adopt unchanged handoffs, narrow checks only, tie-breaks, canonical gates once, predicate checks before acting, bounded follow-up for incomplete handoffs). The `HANDOFF_CONTRACT` now opens Evidence with Baseline and Risks with Needs parent verification; verification is allowed, re-exploration is not.
 
 ## Agents (`~/.pi/agent/agents/`)
 
@@ -84,6 +91,9 @@ When stable, install as a package with `pi install git:github.com/realmorrisliu/
 ## Self-check
 
 ```bash
-bun check.ts   # pure logic self-check
-bun smoke.ts   # offline extension load against a stub API
+bun check.ts                # pure logic self-check
+bun smoke.ts                # offline extension load against a stub API
+bun clone-check.ts          # disposable-clone isolation integration check (real git fixtures)
+bun cleanup-check.ts        # dedicated-root lifecycle + startup stale-run sweep check
+bun orchestration-check.ts  # evidence-ownership contract assertions (static prompt/skill wording checks; no runtime enforcement)
 ```
