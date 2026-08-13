@@ -2,7 +2,7 @@
 name: creative-worker
 description: Creative executor — web pages, 3D games, visual and interactive builds
 tools: read, write, edit, bash, grep, find, ls
-model: kimi-k3
+model: k3
 thinking: high
 ---
 

@@ -1,4 +1,4 @@
-// Per-run disposable local clone for read-only subagent runs (scout, reviewer).
+// Per-run disposable local clone for read-only subagent runs (planner, reviewer).
 // The child works against this clone so its git state — refs, stash, config,
 // index, working tree — is fully independent of the parent's checkout. The
 // clone lives inside the run's temp dir and inherits its cleanup. Fail closed:
@@ -426,7 +426,12 @@ export interface ChildWorkspace {
 	baseline?: CloneBaseline;
 }
 
-/** Write-capable agents keep the shared parent cwd; read-only agents (scout, reviewer) get a per-run disposable clone. Fail closed: preparation failure throws and never falls back to the shared cwd. */
+/** The run's working directory: the subagent `cwd` parameter when given (relative paths resolve against the parent's cwd), else the parent's cwd. Read-only runs snapshot this directory as their clone source; write-capable runs are spawned here. */
+export function resolveRunCwd(cwd: string | undefined, ctxCwd: string): string {
+	return cwd === undefined ? ctxCwd : resolve(ctxCwd, cwd);
+}
+
+/** Write-capable agents keep the run's working directory; read-only agents (planner, reviewer) get a per-run disposable clone of that directory (the subagent `cwd` parameter, default the parent's). Fail closed: preparation failure throws and never falls back to the shared cwd. */
 export async function resolveChildCwd(agent: AgentConfig, cwd: string, tempDir: string, signal?: AbortSignal): Promise<ChildWorkspace> {
 	if (isWriter(agent)) return { cwd };
 	const baseline = await prepareClone(cwd, tempDir, signal);

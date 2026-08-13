@@ -435,27 +435,26 @@ check("parseFrontmatter: body without frontmatter", parseFrontmatter("no fm").bo
 const repoRoot = new URL(".", import.meta.url).pathname;
 const agents = discoverAgents(`${repoRoot}agents`);
 const names = agents.map((agent) => agent.name).sort();
-check("discoverAgents: finds the 4 real agents", names.join(",") === "creative-worker,reviewer,scout,worker");
-const scout = agents.find((agent) => agent.name === "scout");
-check("discoverAgents: scout uses the bounded read-only profile", scout?.model === "deepseek-v4-flash" && scout.thinking === "high" && !isWriter(scout));
-const worker = agents.find((agent) => agent.name === "worker");
-check("discoverAgents: worker uses the default-executor profile", worker?.model === "deepseek-v4-flash" && worker.thinking === "max");
+check("discoverAgents: finds the 3 real agents", names.join(",") === "creative-worker,planner,reviewer");
+check("discoverAgents: no legacy worker/scout agents", !names.includes("worker") && !names.includes("scout"));
+const planner = agents.find((agent) => agent.name === "planner");
+check("discoverAgents: planner uses the strong read-only planning profile", planner?.model === "gpt-5.6-sol" && planner.thinking === "max" && !isWriter(planner));
 const creativeWorker = agents.find((agent) => agent.name === "creative-worker");
-check("discoverAgents: creative-worker uses bounded kimi-k3", creativeWorker?.model === "kimi-k3" && creativeWorker.thinking === "high");
+check("discoverAgents: creative-worker uses bounded k3 (official kimi-coding provider)", creativeWorker?.model === "k3" && creativeWorker.thinking === "high");
 const reviewer = agents.find((agent) => agent.name === "reviewer");
-check("discoverAgents: reviewer uses the strong model at bounded thinking", reviewer?.model === "gpt-5.6-sol" && reviewer.thinking === "minimal");
+check("discoverAgents: reviewer uses the strong model at medium thinking", reviewer?.model === "gpt-5.6-sol" && reviewer.thinking === "medium");
 
 const skill = parseFrontmatter(readFileSync(`${repoRoot}skills/subagent-orchestration/SKILL.md`, "utf8"));
 check("subagent skill: valid discoverable frontmatter", skill.frontmatter.name === "subagent-orchestration" && skill.frontmatter.description?.includes("Use proactively"));
-check("subagent skill: routes non-atomic implementation to worker", skill.body.includes("worker") && skill.body.includes("non-atomic"));
+check("subagent skill: routes complex or uncertain tasks to the read-only planner", skill.body.includes("planner") && skill.body.includes("read-only") && skill.body.includes("complex or uncertain"));
+check("subagent skill: the parent owns exploration and ordinary implementation", skill.body.includes("parent agent owns exploration") && skill.body.includes("implementation"));
 check("subagent skill: background is read-only only", skill.body.includes("background") && skill.body.includes("read-only"));
 check("subagent skill: risk-triggered reviewer policy is concrete", ["security", "concurrency", "schema", "API", "CI", "cross-platform", "cross-module", "retry", "explicit user request"].every((term) => skill.body.toLowerCase().includes(term.toLowerCase())));
-check("subagent skill: parent integrates without repeating exploration", skill.body.includes("do not repeat the worker's exploration"));
-check("subagent skill: atomic exception lists every condition", ["exact file", "localized", "no further exploration", "no iterative test/debug loop", "no review"].every((term) => skill.body.toLowerCase().includes(term.toLowerCase())));
-check("subagent skill: worker failure flow retries once, then handles residual or replans", skill.body.includes("retry once") && skill.body.includes("second failure") && skill.body.includes("residual") && skill.body.includes("replan"));
+check("subagent skill: parent integrates without repeating exploration", skill.body.includes("do not repeat the child's exploration"));
+check("subagent skill: delegated failure flow retries once, then reports the blocker and replans", skill.body.includes("retry once") && skill.body.includes("two failures") && skill.body.includes("report the blocker") && skill.body.includes("replan"));
 check("subagent skill: two empty failures mean outage — stop, one probe, degraded mode", skill.body.includes("no output") && skill.body.includes("infrastructure outage") && skill.body.includes("stop delegating") && skill.body.includes("at most one health probe") && skill.body.includes("degraded mode"));
 check("subagent skill: failed reviewer is not a review", skill.body.includes("not a review") && skill.body.includes("no review feedback"));
-check("subagent skill: no parent take-over of non-atomic worker tasks after two failures", skill.body.includes("do not take the task over in the parent"));
+check("subagent skill: no blind retry of a delegated task after two failures", skill.body.includes("do not blindly retry") && skill.body.includes("report the blocker"));
 
 if (failures > 0) {
 	console.error(`\n${failures} check(s) FAILED`);

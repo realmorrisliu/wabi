@@ -9,6 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { resolveRunCwd } from "./extensions/subagents/clone.ts";
 import { HANDOFF_CONTRACT } from "./extensions/subagents/lib.ts";
 
 let failures = 0;
@@ -55,6 +56,18 @@ check("skill: incomplete handoff gets a bounded follow-up, never a parent take-o
 
 check("docs: non-dup contract is described as prompt/skill + a manual recorded-session checklist", doc.includes("static contract assertions") && doc.includes("recorded-session") && doc.includes("checklist") && doc.includes("manual"));
 check("docs: orchestration is not enforced at runtime", doc.includes("not enforced at runtime"));
+
+// --- 4. Targeted working directory: the subagent tool's optional `cwd` parameter ---
+
+const indexSrc = readFileSync(`${repoRoot}extensions/subagents/index.ts`, "utf8");
+check("tool: subagent accepts an optional cwd working-directory parameter", indexSrc.includes("cwd: Type.Optional("));
+check("tool: run cwd defaults to the parent's working directory", resolveRunCwd(undefined, "/repo") === "/repo");
+check("tool: relative cwd resolves against the parent's working directory", resolveRunCwd("worktrees/x", "/repo") === "/repo/worktrees/x");
+check("tool: absolute cwd wins over the parent's working directory", resolveRunCwd("/target/wt", "/repo") === "/target/wt");
+check("tool: resolved run cwd is wired in — clone source and spawn cwd", indexSrc.includes("resolveRunCwd(params.cwd, ctx.cwd)") && indexSrc.includes("resolveChildCwd(agent, runCwd"));
+check("skill: the working directory is passed as the subagent cwd parameter", skill.includes("subagent `cwd` parameter"));
+check("skill: no local commit is created just to make changes reviewable", skill.includes("Never create a local commit just to make uncommitted changes reviewable"));
+check("agent: reviewer clone wording covers the launched working directory", readFileSync(`${repoRoot}agents/reviewer.md`, "utf8").includes("clone of the working directory your task launched in"));
 
 if (failures > 0) {
 	console.error(`\n${failures} orchestration check(s) FAILED`);

@@ -12,7 +12,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Key, Text, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { activeOwnerTokens, createReadonlyRunDir, sweepReadonlyRuns } from "./cleanup.ts";
-import { resolveChildCwd, type CloneBaseline } from "./clone.ts";
+import { resolveChildCwd, resolveRunCwd, type CloneBaseline } from "./clone.ts";
 import {
 	type AgentConfig,
 	type ArchivedRun,
@@ -101,7 +101,7 @@ interface RunRecord {
 	tempDir?: string;
 	/** Cancellation for clone preparation: stopRun aborts it so prep terminates (killing the current git child) and settles as stopped. */
 	abortPrep?: AbortController;
-	/** Snapshot baseline for read-only runs (scout, reviewer) that execute in a per-run disposable clone. */
+	/** Snapshot baseline for read-only runs (planner, reviewer) that execute in a per-run disposable clone. */
 	baseline?: CloneBaseline;
 	stopRequested?: string;
 	suppressHandoff: boolean;
@@ -151,6 +151,9 @@ const SubagentParams = Type.Object({
 	task: Type.String({ description: "Self-contained task to delegate" }),
 	background: Type.Optional(
 		Type.Boolean({ description: "Return immediately; read-only agents only, with the final result steered back before the parent's next model turn" }),
+	),
+	cwd: Type.Optional(
+		Type.String({ description: "Working directory for the run (default: the parent's current directory; relative paths resolve against it). Pass the target checkout when the task works in a different worktree of the repo, so read-only runs snapshot that directory — its uncommitted changes included — and write-capable runs start in it." }),
 	),
 });
 
@@ -216,8 +219,8 @@ function statusIcon(status: RunStatus): string {
 /** Baseline block appended to a read-only child's task so its handoff can report Baseline accurately. */
 function baselinePrompt(baseline: CloneBaseline): string {
 	return [
-		`Read-only run environment: you are working in a per-run disposable clone of the parent workspace (detached HEAD ${baseline.head}, branch ${baseline.branch}, as-of ${new Date(baseline.asOf).toISOString()}, fingerprint ${baseline.fingerprint}).`,
-		"The parent's staged, unstaged, and non-ignored untracked state was copied into this clone; its refs, stash, config, index, and working tree are independent of the parent's and are discarded when the run ends.",
+		`Read-only run environment: you are working in a per-run disposable clone of the working directory your task launched in (detached HEAD ${baseline.head}, branch ${baseline.branch}, as-of ${new Date(baseline.asOf).toISOString()}, fingerprint ${baseline.fingerprint}).`,
+		"The staged, unstaged, and non-ignored untracked state of the launched working directory was copied into this clone; its refs, stash, config, index, and working tree are independent of the parent's and are discarded when the run ends.",
 		"Stay read-only: do not fetch, checkout, reset, or stash. If you ignore this, only this disposable clone is damaged, never the parent workspace.",
 		"Report this Baseline (HEAD sha, as-of, fingerprint) as the first Evidence item, followed by inspected update markers for dynamic resources.",
 	].join("\n");
@@ -585,7 +588,7 @@ export default function (pi: ExtensionAPI) {
 	 * preparation error fails the run closed with the bounded handoff — never
 	 * a fallback to the shared cwd, never raw git stderr in the handoff.
 	 */
-	async function startRun(run: RunRecord, task: string, ctx: ExtensionContext): Promise<void> {
+	async function startRun(run: RunRecord, task: string, ctx: ExtensionContext, runCwd: string): Promise<void> {
 		const agent = run.agent;
 		const args = [
 			"--mode",
@@ -618,15 +621,18 @@ export default function (pi: ExtensionAPI) {
 			const promptFile = join(run.tempDir, "prompt.md");
 			writeFileSync(promptFile, composeSystemPrompt(agent.systemPrompt), { encoding: "utf8", mode: 0o600 });
 			args.push("--append-system-prompt", promptFile);
-			// Read-only agents (scout, reviewer) run in a per-run disposable clone: their git
+			// Read-only agents (planner, reviewer) run in a per-run disposable clone: their git
 			// state is independent of the parent's and the clone inherits the temp dir's
 			// cleanup. Preparation is asynchronous and cancelable (stop/reload/tool abort
 			// terminate it under one shared total deadline); failure throws and fails the run
-			// closed — never fall back to the shared cwd. Write-capable agents keep the
-			// shared `ctx.cwd` unchanged.
-			let childCwd = ctx.cwd;
+			// closed — never fall back to the shared cwd. The clone is taken from the run's
+			// working directory (the subagent `cwd` parameter, default the parent's), so a
+			// task targeting a different worktree of the repo snapshots exactly that
+			// worktree — that directory's uncommitted changes included. Write-capable
+			// agents keep the run's working directory unchanged.
+			let childCwd = runCwd;
 			if (!run.writer) {
-				const workspace = await resolveChildCwd(agent, ctx.cwd, run.tempDir, run.abortPrep?.signal);
+				const workspace = await resolveChildCwd(agent, runCwd, run.tempDir, run.abortPrep?.signal);
 				childCwd = workspace.cwd;
 				run.baseline = workspace.baseline;
 			}
@@ -824,18 +830,21 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent (wabi)",
-		description: `Delegate substantial independent work to configured child agents (${agentSummary}). Foreground subagent runs stream progress and block until done; background runs return immediately and accept read-only agents only, with the final result steered back before the parent's next model turn. Issue multiple sibling subagent calls in one message for independent blocking work. At most four subagents may run, and only one write-capable subagent at a time; write-capable subagents (worker, creative-worker) must run in the foreground.`,
-		promptSnippet: "Delegate substantial independent research, implementation, creative work, or review to isolated child agents",
+		description: `Delegate substantial independent work to configured child agents (${agentSummary}). Foreground subagent runs stream progress and block until done; background runs return immediately and accept read-only agents only, with the final result steered back before the parent's next model turn. Issue multiple sibling subagent calls in one message for independent blocking work. At most four subagents may run, and only one write-capable subagent at a time; write-capable subagents (creative-worker) must run in the foreground.`,
+		promptSnippet: "Delegate substantial independent planning, review, or creative work to isolated child agents",
 		promptGuidelines: [
-			"Use subagent for non-atomic implementation: delegate to the worker subagent whenever a task needs further exploration, touches multiple files, has an uncertain path, or needs a test/debug loop; keep in the parent only known, localized one-file atomic edits — and only when the exact file is known, one edit suffices with no exploration or test/debug loop, and no risk review is triggered.",
+			"The parent agent owns exploration and ordinary implementation: keep non-atomic implementation in the parent, and do not delegate to subagents work that is small, tightly coupled, or already fully understood. Delegate only when isolation, parallelism, or a specialist child pays for the handoff.",
+			"Before a complex or uncertain task, ask the read-only `planner` subagent for an implementation plan — foreground when the plan gates the next step, background otherwise. Implement the adopted plan in the parent; planner runs are read-only and never implement.",
+			"Use the `creative-worker` subagent for visual, interactive, web, and 3D builds; use the `reviewer` subagent for an independent correctness and complexity pass after risky changes.",
 			"Issue sibling foreground subagent calls in one assistant message for independent blocking work so they run in parallel; do not duplicate delegated scope across subagents.",
-			"Use subagent in background only for read-only, nonblocking work (scout, reviewer); write-capable subagents (worker, creative-worker) must run in the foreground.",
+			"Use subagent in background only for read-only, nonblocking work (planner, reviewer); write-capable subagents (creative-worker) must run in the foreground.",
 			"Never poll or sleep for a subagent; never answer before required subagent runs finish — await each result, then integrate and verify it.",
 			"Two consecutive subagent failures with no output mean an infrastructure outage (shared across all agents): stop delegating, report degraded mode, and run at most one health probe after the cooldown — never retry blindly into an open circuit.",
 			"A failed subagent reviewer run is not a review: it provides no review feedback, so never treat it as one; re-review only after the underlying failure is resolved.",
-			"After two failures of a non-atomic multi-file worker subagent task, do not take the task over in the parent: keep in the parent only a residual that is itself atomic, otherwise report the blocker and replan.",
-			"After risky subagent changes, delegate an independent review to the reviewer subagent (the subagent-orchestration skill lists the risk classes); verify the integrated result in the parent without repeating the worker's exploration.",
-			"Scout and reviewer subagent runs execute in a per-run disposable clone of the parent checkout (detached HEAD at launch, snapshotting staged, unstaged, and non-ignored untracked state); a failed clone preparation fails the run closed — never fall back to the shared working directory, never retry the same launch blindly.",
+			"After two failures of the same delegated subagent task, do not blindly retry: report the blocker and replan (a fresh planner run may help) instead of hammering the same launch.",
+			"After risky subagent changes, delegate an independent review to the reviewer subagent (the subagent-orchestration skill lists the risk classes); verify the integrated result in the parent without repeating the child's exploration.",
+			"Planner and reviewer subagent runs execute in a per-run disposable clone of the run's working directory (detached HEAD at launch, snapshotting staged, unstaged, and non-ignored untracked state); a failed clone preparation fails the run closed — never fall back to the shared working directory, never retry the same launch blindly.",
+			"Pass the subagent `cwd` parameter (default: the parent's current directory) when the delegated task targets a different working directory — e.g. another worktree or checkout of the same repo. Read-only runs then snapshot that directory instead of the parent's, so the reviewer's clone contains that directory's uncommitted changes; write-capable runs start in it. Never create a local commit just to make uncommitted changes reviewable.",
 			"Delegating a scope transfers evidence ownership to the subagent child: before delegating, collect only routing inventory (ids, titles, states, labels, updatedAt, repo HEAD); after the handoff, verify with a batched freshness delta and narrow checks — do not re-read full evidence the child already summarized (see the subagent-orchestration skill).",
 			"Consult the subagent-orchestration skill for detailed routing and agent selection.",
 		],
@@ -865,6 +874,12 @@ export default function (pi: ExtensionAPI) {
 			if (!circuit.allowLaunch()) throw new Error(circuitBlockedMessage(agent.name));
 
 			const task = params.task.trim();
+			// The run's working directory: the subagent `cwd` parameter when given (relative
+			// paths resolve against the parent's cwd), else the parent's cwd. Read-only runs
+			// snapshot this directory as their clone source; write-capable runs are spawned
+			// here — so a task targeting a different worktree gets a reviewer clone that
+			// actually contains that directory's uncommitted changes.
+			const runCwd = resolveRunCwd(params.cwd, ctx.cwd);
 			const run = launchRun(agent, task, background, ctx, background ? undefined : onUpdate);
 
 			// Foreground: wire the tool's abort signal BEFORE preparation starts, so an
@@ -877,7 +892,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			// Background still returns only after preparation completes and the child is
 			// spawned (prep is async now, but the tool call waits for it, as before).
-			await startRun(run, task, ctx);
+			await startRun(run, task, ctx, runCwd);
 
 			if (background) {
 				// A preparation failure (or a stop during preparation) settles the run

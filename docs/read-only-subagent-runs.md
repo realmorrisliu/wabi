@@ -5,7 +5,7 @@ Status: **implemented.** This document is the design record; `extensions/subagen
 ## Problem
 
 `launchRun` in `extensions/subagents/index.ts` spawns every child with `cwd: ctx.cwd` —
-the parent's working directory, which is a Git worktree. Scout and reviewer are
+the parent's working directory, which is a Git worktree. Planner and reviewer are
 read-only *by policy* (agent prompt), not by enforcement. The audit of session
 `019ff0a2-251a-7342-b5cd-285c72c4565d` confirmed two root causes, each with concrete
 failure modes:
@@ -37,8 +37,8 @@ parent pays the full exploration cost on both sides — delegation loses its val
 The design boundary accepted by the user is deliberately minimal, and both root causes
 are in scope at the same level:
 
-- **Execution ownership:** isolate only the read-only agents (scout, reviewer) into a
-  disposable local clone per run; leave worker/creative-worker on the shared checkout;
+- **Execution ownership:** isolate only the read-only agents (planner, reviewer) into a
+  disposable local clone per run; leave creative-worker on the shared checkout;
   solve the shared-checkout and concurrent-refs problems. Clone preparation is
   asynchronous, cancelable (stop/reload/tool abort), and bounded by one shared total
   deadline; a clone failure or an abort never falls back to the shared cwd.
@@ -52,7 +52,7 @@ Everything else is deferred (see Deferred items).
 
 ### Execution isolation
 
-- Read-only children (scout, reviewer) work against a per-run disposable local clone,
+- Read-only children (planner, reviewer) work against a per-run disposable local clone of the run's working directory (the optional `cwd` parameter, default the parent's),
   never the parent's checkout. This holds in foreground and background modes — the
   only modes read-only agents run in.
 - The child sees the parent's working tree exactly: staged changes stay staged, unstaged
@@ -68,8 +68,7 @@ Everything else is deferred (see Deferred items).
 - A parent change after a consistent snapshot was captured does not fail the child;
   it makes the result stale against its recorded Baseline and requires a narrow
   freshness check before integration.
-- The external interface is unchanged: `subagent({ agent, task, background })` keeps its
-  shape and semantics. No new user-facing options.
+- The external interface gains one optional field: `subagent({ agent, task, background?, cwd? })`. `cwd` is the run's working directory (default: the parent's cwd); read-only runs clone the worktree containing it, write-capable runs are spawned there. Nothing else about the tool's shape or semantics changes.
 
 ### Evidence ownership
 
@@ -113,9 +112,11 @@ temp directory that is deleted when the run finishes.
 
 ### Clone creation
 
-- Default: create the clone from the Git worktree containing the parent cwd, at the
-  parent's local HEAD at launch, checked out **detached** (no branch). That HEAD sha
-  is the child's fixed baseline — no fetch is required for it.
+- Default: create the clone from the Git worktree containing the **run's working directory** — the subagent tool's optional `cwd` parameter, default the parent's cwd — at that directory's local HEAD at launch, checked out **detached** (no branch). That HEAD sha is the child's fixed baseline — no fetch is required for it.
+
+### Targeted working directory (`cwd`)
+
+The tool interface is `subagent({ agent, task, background?, cwd? })`: the optional `cwd` names the working directory for the run (relative paths resolve against the parent's cwd). Write-capable children are spawned there; read-only children (planner, reviewer) snapshot it — the clone is taken from the worktree containing it. This exists because a delegated task's working directory is not always the parent's own: the parent may work in a linked worktree or checkout of the repo, and the changes under review live there. Without `cwd`, a reviewer's clone captured only the parent's checkout and missed them — observed in session `019fee62-c658-7399-b5ac-e455a3cd405f` (reviewer-26 blocked with "the injected clone does not represent the requested worktree"), which pushed the parent into a side-effect workaround (a local commit, review-by-SHA, then live install). With `cwd`, the parent states the same working directory it put in the task text, and the reviewer's clone reproduces exactly that directory's uncommitted state — no commit is ever needed just to make changes reviewable.
 - Read-only runs live in a **dedicated root**: `${tmpdir()}/wabi-readonly-runs/`,
   one directory per run named `wabi-ro-<runId>` (created mode 0700). The run's
   tempDir **is** this whole run dir (the prompt temp file and the clone live
@@ -155,7 +156,7 @@ temp directory that is deleted when the run finishes.
   run as **stopped** (never an infrastructure empty failure); a deadline
   expiry settles it as stopped too. Any other preparation error fails the
   run closed with the bounded handoff — no git stderr leaks into the handoff.
-- The child process is spawned with `cwd` set to the clone instead of `ctx.cwd`.
+- The child process is spawned with `cwd` set to the clone instead of the run's working directory.
   Everything else about the spawn (args, env, stdio, prompts) is unchanged.
   For foreground runs the tool's abort signal is wired **before** preparation
   starts; background runs never wire it, so the tool call ending cannot stop
@@ -201,7 +202,7 @@ is the repo root, the child starts at the clone root.
 
 ### Child policy and isolation boundary
 
-- Scout/reviewer prompts keep their existing "read-only by policy" instruction: the
+- Planner/reviewer prompts keep their existing "read-only by policy" instruction: the
   child should not fetch, checkout, reset, or stash in its clone. The task text also
   carries the run's Baseline (detached HEAD sha, branch, as-of, fingerprint) so the
   child's handoff can report it accurately.
@@ -308,13 +309,13 @@ delta in step 2 — it never re-pulls bodies to find out what changed.
 
 **A target session, good and bad.**
 
-Bad: the parent pulls every issue body + timeline → scouts pull the same evidence →
+Bad: the parent pulls every issue body + timeline → read-only children pull the same evidence →
 the parent re-queries each issue, PR, and OpenSpec document to integrate. Same evidence
 read three times; the child's compression is discarded.
 
 Good: the parent pulls only the issue inventory (id/title/state/labels/`updatedAt`) and
 records a fixed SHA + as-of → delegates mutually exclusive scopes by domain (e.g.
-#148 auth, #149 billing, #150 perf) → each scout fully investigates its scope and hands
+#148 auth, #149 billing, #150 perf) → each read-only child fully investigates its scope and hands
 back evidence with baselines → the parent runs one batched state/`updatedAt` delta and
 one check per shared canonical gate → summarizes from the handoffs. If #150 moved
 open → closed while the run was in flight, only #150's finding is re-reviewed.

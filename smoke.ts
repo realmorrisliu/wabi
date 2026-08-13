@@ -7,7 +7,7 @@
 // NODE_PATH set, and then runs the real checks below.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,6 +40,22 @@ if (!process.env.WABI_SMOKE_RUNNER) {
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { OWNER_MARKER_NAME, readonlyRunsRoot, runDirName } from "./extensions/subagents/cleanup.ts";
+
+// Hermetic agent set: point the extension's agent dir (PI_CODING_AGENT_DIR,
+// honored by getAgentDir) at a temp dir with this repo's agents symlinked in,
+// so discoverAgents sees exactly planner/reviewer/creative-worker — never the
+// installed global agent dir, which can lag or carry stale (dangling) agents.
+// Auth/models/runs-archive paths follow the same temp dir and never touch the
+// user's real agent dir. Set BEFORE the extension registers.
+const smokeAgentDir = mkdtempSync(join(tmpdir(), "wabi-smoke-agent-"));
+const smokeAgentsDir = join(smokeAgentDir, "agents");
+mkdirSync(smokeAgentsDir);
+for (const entry of readdirSync(join(dirname(fileURLToPath(import.meta.url)), "agents"))) {
+	if (!entry.endsWith(".md")) continue;
+	symlinkSync(join(dirname(fileURLToPath(import.meta.url)), "agents", entry), join(smokeAgentsDir, entry));
+}
+process.env.PI_CODING_AGENT_DIR = smokeAgentDir;
+process.on("exit", () => rmSync(smokeAgentDir, { recursive: true, force: true }));
 const { default: registerExtension } = await import("./extensions/subagents/index.ts");
 
 let failures = 0;
@@ -68,7 +84,7 @@ check("extension loads and registers the subagent tool", tool?.name === "subagen
 check("every prompt guideline names subagent", (tool?.promptGuidelines?.length ?? 0) > 0 && (tool?.promptGuidelines ?? []).every((guideline) => guideline.includes("subagent")));
 check("guidelines: two no-output failures mean outage — stop, probe, degraded mode", (tool?.promptGuidelines ?? []).some((g) => g.includes("infrastructure outage") && g.includes("health probe") && g.includes("degraded mode")));
 check("guidelines: failed reviewer is not a review", (tool?.promptGuidelines ?? []).some((g) => g.includes("reviewer run is not a review")));
-check("guidelines: no parent take-over of non-atomic worker tasks after two failures", (tool?.promptGuidelines ?? []).some((g) => g.includes("do not take the task over in the parent")));
+check("guidelines: no blind retry of a delegated task after two failures", (tool?.promptGuidelines ?? []).some((g) => g.includes("do not blindly retry") && g.includes("report the blocker") && g.includes("replan")));
 check("tool description states background is read-only only", tool?.description?.includes("read-only agents only") ?? false);
 check("completion renderer, inspector surface, and session handlers wired at load", Boolean(registered.renderer) && Boolean(registered.command) && Boolean(registered.shortcut) && typeof (registered.handlers as Record<string, unknown>)?.session_start === "function" && typeof (registered.handlers as Record<string, unknown>)?.session_shutdown === "function");
 
@@ -99,7 +115,7 @@ try {
 	let error: unknown;
 	let result: unknown;
 	try {
-		result = await execute?.("t4", { agent: "scout", task: "probe", background: true }, undefined, undefined, stubCtx);
+		result = await execute?.("t4", { agent: "planner", task: "probe", background: true }, undefined, undefined, stubCtx);
 	} catch (caught) {
 		error = caught;
 	}
@@ -118,7 +134,7 @@ try {
 	rmSync(fakeBinDir, { recursive: true, force: true });
 }
 
-// Extension-integration fail-closed path: launching a read-only agent (scout) with a
+// Extension-integration fail-closed path: launching a read-only agent (planner) with a
 // non-Git cwd must fail closed with the bounded handoff — never spawn a child, never
 // fall back to the shared cwd, and never leak raw git stderr into the handoff.
 const nonGitCwd = mkdtempSync(join(tmpdir(), "wabi-smoke-"));
@@ -132,7 +148,7 @@ try {
 	};
 	let error: unknown;
 	try {
-		await execute?.("t1", { agent: "scout", task: "probe" }, undefined, undefined, stubCtx);
+		await execute?.("t1", { agent: "planner", task: "probe" }, undefined, undefined, stubCtx);
 	} catch (caught) {
 		error = caught;
 	}
@@ -160,7 +176,7 @@ try {
 	const stubCtx = { cwd: repoCwd, mode: "json", isProjectTrusted: () => false, ui: { setWidget: () => {} } };
 	let error: unknown;
 	try {
-		await execute?.("t2", { agent: "scout", task: "probe" }, controller.signal, undefined, stubCtx);
+		await execute?.("t2", { agent: "planner", task: "probe" }, controller.signal, undefined, stubCtx);
 	} catch (caught) {
 		error = caught;
 	}
@@ -180,7 +196,7 @@ try {
 	const stubCtx = { cwd: backgroundCwd, mode: "rpc", isProjectTrusted: () => false, ui: { setWidget: () => {} } };
 	let error: unknown;
 	try {
-		await execute?.("t3", { agent: "scout", task: "probe", background: true }, undefined, undefined, stubCtx);
+		await execute?.("t3", { agent: "planner", task: "probe", background: true }, undefined, undefined, stubCtx);
 	} catch (caught) {
 		error = caught;
 	}

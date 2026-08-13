@@ -260,6 +260,50 @@ function buildSnapshotFixture(): string {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. Targeted working directory: the clone source is the worktree containing
+//     the requested cwd, so a reviewer pointed at the implementing directory sees
+//     its uncommitted changes there — while a clone of the parent's
+//     own worktree stays clean. This is the mechanism behind the subagent
+//     tool's `cwd` parameter (the observed session had the parent editing in a
+//     linked worktree and a reviewer clone that captured only the parent's).
+// ---------------------------------------------------------------------------
+{
+	const repo = mkdtempSync(join(tmpdir(), "wabi-clone-worktrees-"));
+	const linked = join(dirname(repo), `${dirname(repo).split("/").at(-1)}-linked`);
+	const tempA = mkdtempSync(join(tmpdir(), "wabi-clone-run-"));
+	const tempB = mkdtempSync(join(tmpdir(), "wabi-clone-run-"));
+	try {
+		initRepo(repo);
+		writeFileSync(join(repo, "base.txt"), "base\n");
+		git(["add", "."], repo);
+		git(["commit", "-qm", "c1"], repo);
+		// A second linked worktree of the same repo — where the parent works.
+		git(["worktree", "add", "-q", "-b", "implement", linked], repo);
+		writeFileSync(join(linked, "new.txt"), "uncommitted change\n");
+		git(["add", "new.txt"], linked); // staged in the implementing worktree
+		writeFileSync(join(linked, "base.txt"), "base + edit\n"); // unstaged
+
+		const parentClone = await prepareClone(repo, tempA);
+		check("targeted cwd: clone of the parent worktree does not see the other worktree's uncommitted changes", git(["status", "--porcelain"], parentClone.cloneRoot) === "" && !existsSync(join(parentClone.cloneRoot, "new.txt")));
+		const implClone = await prepareClone(linked, tempB);
+		check("targeted cwd: clone of the implementing worktree reproduces its uncommitted changes", (() => {
+			const sourceStatus = git(["status", "--porcelain"], linked).split("\n").filter(Boolean).sort();
+			const cloneStatus = git(["status", "--porcelain"], implClone.cloneRoot).split("\n").filter(Boolean).sort();
+			return readFileSync(join(implClone.cloneRoot, "new.txt"), "utf8") === "uncommitted change\n"
+				&& readFileSync(join(implClone.cloneRoot, "base.txt"), "utf8") === "base + edit\n"
+				&& JSON.stringify(cloneStatus) === JSON.stringify(sourceStatus)
+				&& implClone.head === git(["rev-parse", "HEAD"], linked);
+		})());
+		check("targeted cwd: the parent worktree itself stays untouched", git(["status", "--porcelain"], repo) === "" && !existsSync(join(repo, "new.txt")));
+	} finally {
+		rmSync(repo, { recursive: true, force: true });
+		rmSync(linked, { recursive: true, force: true });
+		rmSync(tempA, { recursive: true, force: true });
+		rmSync(tempB, { recursive: true, force: true });
+	}
+}
+
+// ---------------------------------------------------------------------------
 // 4. Cleanup, consistency, and fail-closed preparation.
 // ---------------------------------------------------------------------------
 {
@@ -351,8 +395,8 @@ function buildSnapshotFixture(): string {
 	const repo = buildSnapshotFixture();
 	const runDir4 = mkdtempSync(join(tmpdir(), "wabi-clone-run-"));
 	try {
-		const writer = { name: "worker", description: "", tools: ["read", "edit"], systemPrompt: "" };
-		const reader = { name: "scout", description: "", tools: ["read", "bash"], systemPrompt: "" };
+		const writer = { name: "writer-fixture", description: "", tools: ["read", "edit"], systemPrompt: "" };
+		const reader = { name: "reader-fixture", description: "", tools: ["read", "bash"], systemPrompt: "" };
 		const writerWorkspace = await resolveChildCwd(writer, repo, runDir4);
 		check("routing: writer keeps the shared cwd, no clone, no baseline", writerWorkspace.cwd === repo && writerWorkspace.baseline === undefined && !existsSync(join(runDir4, "clone")));
 		const readerWorkspace = await resolveChildCwd(reader, repo, runDir4);
