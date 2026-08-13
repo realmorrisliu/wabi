@@ -438,11 +438,11 @@ const names = agents.map((agent) => agent.name).sort();
 check("discoverAgents: finds the 3 real agents", names.join(",") === "creative-worker,planner,reviewer");
 check("discoverAgents: no legacy worker/scout agents", !names.includes("worker") && !names.includes("scout"));
 const planner = agents.find((agent) => agent.name === "planner");
-check("discoverAgents: planner uses the strong read-only planning profile", planner?.model === "gpt-5.6-sol" && planner.thinking === "max" && !isWriter(planner));
+check("discoverAgents: planner uses the strong read-only planning profile", planner?.model === "openai-codex/gpt-5.6-sol" && planner.thinking === "max" && !isWriter(planner));
 const creativeWorker = agents.find((agent) => agent.name === "creative-worker");
-check("discoverAgents: creative-worker uses bounded k3 (official kimi-coding provider)", creativeWorker?.model === "k3" && creativeWorker.thinking === "high");
+check("discoverAgents: creative-worker uses explicit kimi-coding k3", creativeWorker?.model === "kimi-coding/k3" && creativeWorker.thinking === "high");
 const reviewer = agents.find((agent) => agent.name === "reviewer");
-check("discoverAgents: reviewer uses the strong model at medium thinking", reviewer?.model === "gpt-5.6-sol" && reviewer.thinking === "medium");
+check("discoverAgents: reviewer uses the strong model at medium thinking", reviewer?.model === "openai-codex/gpt-5.6-sol" && reviewer.thinking === "medium");
 
 const skill = parseFrontmatter(readFileSync(`${repoRoot}skills/subagent-orchestration/SKILL.md`, "utf8"));
 check("subagent skill: valid discoverable frontmatter", skill.frontmatter.name === "subagent-orchestration" && skill.frontmatter.description?.includes("Use proactively"));

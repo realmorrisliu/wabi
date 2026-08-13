@@ -29,11 +29,11 @@ Children inherit project context and skills, but not ambient extensions, prompt 
 
 This repository defines only **child agents**. The main/parent agent's model is configured by your pi session (project or user config), not by this repo; the recommended/target main model is `deepseek-v4-flash`, which drives exploration and ordinary implementation itself.
 
-| agent | model | role |
+| agent | model (provider/id) | role |
 |---|---|---|
-| `planner` | gpt-5.6-sol | read-only planning — decomposes complex or uncertain tasks into an implementation plan (max thinking) |
-| `creative-worker` | k3 (official kimi-coding API) | creative executor — web pages, 3D games, visual builds (full file access, high thinking) |
-| `reviewer` | gpt-5.6-sol | correctness + ponytail-review complexity pass (read-only by policy, medium thinking) |
+| `planner` | openai-codex/gpt-5.6-sol | read-only planning — decomposes complex or uncertain tasks into an implementation plan (max thinking) |
+| `creative-worker` | kimi-coding/k3 | creative executor — web pages, 3D games, visual builds (full file access, high thinking) |
+| `reviewer` | openai-codex/gpt-5.6-sol | correctness + ponytail-review complexity pass (read-only by policy, medium thinking) |
 
 Change an agent's model, thinking level, tools, or instructions in its Markdown frontmatter. Per-call overrides are intentionally unsupported so runs stay reproducible.
 

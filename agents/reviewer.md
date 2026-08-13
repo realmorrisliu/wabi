@@ -2,7 +2,7 @@
 name: reviewer
 description: Code review specialist — correctness pass plus ponytail-review complexity pass
 tools: read, grep, find, ls, bash
-model: gpt-5.6-sol
+model: openai-codex/gpt-5.6-sol
 thinking: medium
 ---
 

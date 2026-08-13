@@ -2,7 +2,7 @@
 name: planner
 description: Read-only planning specialist — decomposes complex or uncertain tasks into a concrete implementation plan for the parent
 tools: read, grep, find, ls, bash
-model: gpt-5.6-sol
+model: openai-codex/gpt-5.6-sol
 thinking: max
 ---
 
