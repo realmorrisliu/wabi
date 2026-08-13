@@ -53,6 +53,7 @@ const ERROR_FALLBACK_MS = 1_000;
 /** After SIGKILL, how long to wait for the child's `close` event before finalizing the run ourselves. */
 const CLOSE_GRACE_MS = 500;
 const COMPLETION_TYPE = "wabi-subagent-complete";
+const WIDGET_KEY = "wabi-subagents";
 
 /** Owner tokens of live extension instances in this process, kept in a process-global registry (a `Symbol.for`-keyed set on globalThis, see cleanup.ts) so every copy of this module in the same JS realm — duplicate/aliased extension paths, reloads — shares one set. The startup stale-run sweep skips any run whose marker token is registered here, and deletes runs of previous instances of this same process (reloads, session switches) that are not — a pid + identity check alone cannot see a reload inside the same process. One process can hold several extension instances at once (pi re-invokes the factory on every reload and session switch, and duplicate/aliased extension paths load twice), so each instance registers its own token when it loads and deregisters it in its own session_shutdown — never in another instance's load, never clearing other tokens. pi awaits an instance's session_shutdown before the next instance loads, so a replaced instance's token is gone by the next session_start sweep (its leftover dirs become reclaimable via the same-process rule) while every live instance's runs stay protected. */
 
@@ -343,6 +344,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** Persistent top bar: a compact two-line status that never takes focus away from the editor. Installed when runs become visible, removed when they clear; the component re-renders itself once per second. */
+	/** Persistent status line above the editor (the only non-scrolling "top bar" pi offers — setHeader lives inside the scrolling chat document and rolls out of view). One compact line: counts, cost, and the expand hint. */
 	function refreshHeader(): void {
 		const ctx = latestCtx;
 		if (ctx?.mode !== "tui") return;
@@ -351,50 +353,56 @@ export default function (pi: ExtensionAPI) {
 			if (headerTimer) {
 				clearInterval(headerTimer); // stop the flip monitor; the next ensureHeader restarts it when a run appears
 				headerTimer = undefined;
-				ctx.ui.setHeader(undefined);
+				ctx.ui.setWidget(WIDGET_KEY, undefined);
 			}
 			return;
 		}
-		if (headerTimer) return; // already installed; the component refreshes itself
-		ctx.ui.setHeader((tui, theme) => {
-			const renderTimer = setInterval(() => tui.requestRender(), 1_000);
-			const bgLine = (line: string, width: number) => theme.bg("customMessageBg", line + " ".repeat(Math.max(0, width - visibleWidth(line))));
-			return {
-				render(width: number): string[] {
-					const current = visibleRuns();
-					const activeCount = current.filter(isActive).length;
-					const doneCount = current.filter((run) => run.status === "completed").length;
-					const failedCount = current.filter((run) => run.status === "failed").length;
-					const totalCost = current.reduce((sum, run) => sum + (run.usage.cost || 0), 0);
-					const cost = formatCost(totalCost);
-					const narrow = width < 80;
-					const sep = theme.fg("muted", " · ");
-					const counts: string[] = [theme.fg("accent", `● ${activeCount} running`)];
-					if (doneCount > 0) counts.push(theme.fg("success", `✓ ${doneCount} done`));
-					if (failedCount > 0) counts.push(theme.fg("error", `✗ ${failedCount} failed`));
-					if (cost && width >= 100) counts.push(theme.fg("text", cost));
-					const title = `${theme.fg("accent", theme.bold("SUBAGENTS"))}  ${counts.join(sep)}`;
-					const lines = [bgLine(title, width)];
-					const perRun = current
-						.slice(0, narrow ? 2 : 3)
-						.map((run) => {
-							const color = run.status === "failed" ? "error" : run.status === "completed" ? "success" : run.status === "stopped" ? "warning" : "accent";
-							const elapsed = formatDuration((run.endedAt ?? Date.now()) - run.startedAt);
-							return `${theme.fg(color, statusIcon(run.status))} ${theme.fg("text", run.agent.name)}${narrow ? "" : ` ${theme.fg("muted", elapsed)}`}`;
-						})
-						.join(theme.fg("dim", " · "));
-					const more = current.length - (narrow ? 2 : 3);
-					lines.push(bgLine(perRun + (more > 0 ? theme.fg("dim", ` · +${more} more`) : ""), width));
-					if (width >= 60) lines.push(bgLine(theme.fg("dim", process.platform === "darwin" ? "⌘S 展开 subagent 面板 · /subagents" : "Alt+S 展开 subagent 面板 · /subagents"), width));
-					lines.push(theme.fg("borderMuted", "─".repeat(Math.max(1, width))));
-					return lines.map((line) => truncateToWidth(line, width));
-				},
-				invalidate() {},
-				dispose() {
-					clearInterval(renderTimer);
-				},
-			};
-		});
+		if (headerTimer) return; // already installed; the widget refreshes itself below
+		ctx.ui.setWidget(
+			WIDGET_KEY,
+			(tui, theme) => {
+				const renderTimer = setInterval(() => tui.requestRender(), 1_000);
+				const bgLine = (line: string, width: number) => theme.bg("customMessageBg", line + " ".repeat(Math.max(0, width - visibleWidth(line))));
+				return {
+					render(width: number): string[] {
+						const current = visibleRuns();
+						const activeCount = current.filter(isActive).length;
+						const doneCount = current.filter((run) => run.status === "completed").length;
+						const failedCount = current.filter((run) => run.status === "failed").length;
+						const totalCost = current.reduce((sum, run) => sum + (run.usage.cost || 0), 0);
+						const cost = formatCost(totalCost);
+						const narrow = width < 80;
+						const sep = theme.fg("muted", " · ");
+						const counts: string[] = [theme.fg("accent", `● ${activeCount} running`)];
+						if (doneCount > 0) counts.push(theme.fg("success", `✓ ${doneCount} done`));
+						if (failedCount > 0) counts.push(theme.fg("error", `✗ ${failedCount} failed`));
+						if (cost && !narrow) counts.push(theme.fg("text", cost));
+						const title = `${theme.fg("accent", theme.bold("SUBAGENTS"))}  ${counts.join(sep)}`;
+						const perRun = current
+							.slice(0, narrow ? 2 : 3)
+							.map((run) => {
+								const color = run.status === "failed" ? "error" : run.status === "completed" ? "success" : run.status === "stopped" ? "warning" : "accent";
+								const elapsed = formatDuration((run.endedAt ?? Date.now()) - run.startedAt);
+								return `${theme.fg(color, statusIcon(run.status))} ${theme.fg("text", run.agent.name)}${narrow ? "" : ` ${theme.fg("muted", elapsed)}`}`;
+							})
+							.join(theme.fg("dim", " · "));
+						const more = current.length - (narrow ? 2 : 3);
+						const hint = process.platform === "darwin" ? "⌘S 展开面板 · /subagents" : "Alt+S 展开面板 · /subagents";
+						const lines = [
+							bgLine(title + (narrow ? "" : `  ${theme.fg("dim", hint)}`), width),
+							bgLine(perRun + (more > 0 ? theme.fg("dim", ` · +${more} more`) : ""), width),
+							bgLine("", width), // spacer keeps the band visually separate from the editor
+						];
+						return lines.map((line) => truncateToWidth(line, width));
+					},
+					invalidate() {},
+					dispose() {
+						clearInterval(renderTimer);
+					},
+				};
+			},
+			{ placement: "aboveEditor" },
+		);
 		headerTimer = setInterval(refreshHeader, 1_000); // keeps the 0↔non-zero flip monitored
 	}
 
@@ -857,7 +865,7 @@ export default function (pi: ExtensionAPI) {
 						out.push(...leftLines.slice(listStart, listStart + rows - 2));
 						out.push("");
 						if (confirmStop === current.id) out.push(theme.fg("warning", "Stop this run? y confirm · any other key cancel"));
-						else out.push(theme.fg("dim", `↑↓ select · Enter 详情 · ←/→ group ${GROUP_NAMES[groupFilter]} · s stop · Esc close`));
+						else out.push(theme.fg("dim", `↑↓/jk select · Enter 详情 · ←/→ group ${GROUP_NAMES[groupFilter]} · s stop · Esc close`));
 						return box(theme, out, width).map((line) => truncateToWidth(line, width));
 					},
 					handleInput(data: string): void {
@@ -873,8 +881,8 @@ export default function (pi: ExtensionAPI) {
 						}
 						if (matchesKey(data, Key.escape)) done(undefined);
 						else if (matchesKey(data, Key.enter) && current) done(current.id);
-						else if (matchesKey(data, Key.up)) move(-1);
-						else if (matchesKey(data, Key.down)) move(1);
+						else if (matchesKey(data, Key.up) || data === "k") move(-1);
+						else if (matchesKey(data, Key.down) || data === "j") move(1);
 						else if (matchesKey(data, Key.left)) cycleGroup(-1);
 						else if (matchesKey(data, Key.right)) cycleGroup(1);
 						else if (data === "s" && current && isActive(current)) confirmStop = current.id;
@@ -939,7 +947,7 @@ export default function (pi: ExtensionAPI) {
 					out.push(...body.slice(view.start, view.end));
 					out.push(theme.fg("borderMuted", "─".repeat(Math.max(1, width))));
 					if (confirmStop === current.id) out.push(theme.fg("warning", "Stop this run? y confirm · any other key cancel"));
-					else out.push(theme.fg("dim", `PgUp/PgDn scroll · Ctrl+T thinking ${showThinking ? "on" : "off"} · s stop · Esc 返回`));
+					else out.push(theme.fg("dim", `↑↓/jk scroll · PgUp/PgDn page · Ctrl+T thinking ${showThinking ? "on" : "off"} · s stop · Esc 返回`));
 					return terminalClamp(out, process.stdout.rows).map((line) => truncateToWidth(line, width));
 				},
 				handleInput(data: string): void {
@@ -954,6 +962,8 @@ export default function (pi: ExtensionAPI) {
 						return;
 					}
 					if (matchesKey(data, Key.escape)) done(undefined);
+					else if (matchesKey(data, Key.up) || data === "k") scroll += 1; // render clamps the upper bound
+					else if (matchesKey(data, Key.down) || data === "j") scroll = Math.max(0, scroll - 1);
 					else if (matchesKey(data, Key.pageUp)) scroll += Math.max(5, (process.stdout.rows ?? 30) - 12);
 					else if (matchesKey(data, Key.pageDown)) scroll = Math.max(0, scroll - Math.max(5, (process.stdout.rows ?? 30) - 12));
 					else if (matchesKey(data, Key.ctrl("t"))) showThinking = !showThinking;
@@ -1172,7 +1182,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (headerTimer) clearInterval(headerTimer);
 		headerTimer = undefined;
-		ctx.ui.setHeader(undefined);
+		ctx.ui.setWidget(WIDGET_KEY, undefined);
 		runs.clear();
 		history.clear();
 		runsDir = undefined;

@@ -282,14 +282,14 @@ try {
 	}
 }
 
-// Fake lifecycle: with no active runs, session shutdown must settle and clear the header.
+// Fake lifecycle: with no active runs, session shutdown must settle and clear the status widget.
 const handlers = registered.handlers as Record<string, unknown>;
-const shutdown = handlers.session_shutdown as ((event: unknown, ctx: { ui: { setHeader: (content: unknown) => void } }) => Promise<void>) | undefined;
-const headerClears: string[] = [];
+const shutdown = handlers.session_shutdown as ((event: unknown, ctx: { ui: { setWidget: (key: string, value: unknown) => void } }) => Promise<void>) | undefined;
+const widgetClears: string[] = [];
 const shutdownSettled = typeof shutdown === "function"
-	? await shutdown({}, { ui: { setHeader: (content: unknown) => { if (content === undefined) headerClears.push("header"); } } }).then(() => true).catch(() => false)
+	? await shutdown({}, { ui: { setWidget: (key: string, value: unknown) => { if (value === undefined) widgetClears.push(key); } } }).then(() => true).catch(() => false)
 	: false;
-check("shutdown: fake lifecycle settles and clears the header", shutdownSettled && headerClears.includes("header"));
+check("shutdown: fake lifecycle settles and clears the status widget", shutdownSettled && widgetClears.includes("wabi-subagents"));
 
 if (failures > 0) {
 	console.error(`\n${failures} smoke check(s) FAILED`);
