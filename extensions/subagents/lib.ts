@@ -269,6 +269,7 @@ export interface RunArtifact {
 	version: 1;
 	id: string;
 	agent: string;
+	model?: string;
 	task: string;
 	status: string;
 	background: boolean;
@@ -415,11 +416,13 @@ export function serializeRunArtifact(artifact: RunArtifact, maxBytes = ARTIFACT_
 	const transcriptBytes = transcript.reduce((sum, entry) => sum + Buffer.byteLength(entry.text), 0);
 	const id = normalizePersistedString(artifact.id, MAX_ID_BYTES);
 	const agent = normalizePersistedString(artifact.agent, MAX_AGENT_BYTES);
+	const model = artifact.model === undefined ? undefined : normalizePersistedString(String(artifact.model), MAX_ID_BYTES) || undefined;
 	const normalized: RunArtifact = {
 		kind: "wabi-run",
 		version: 1,
 		id: id || "unknown",
 		agent: agent || "unknown",
+		model,
 		task: truncateUtf8Prefix(String(artifact.task ?? ""), ARTIFACT_TASK_BYTES),
 		status: artifact.status === "completed" || artifact.status === "failed" || artifact.status === "stopped" ? artifact.status : "failed",
 		background: artifact.background === true,
@@ -463,11 +466,13 @@ export function parseRunArtifact(text: string): RunArtifact | undefined {
 		const stopReason = typeof raw.stopReason === "string" ? normalizePersistedString(raw.stopReason, MAX_STOP_REASON_BYTES) : undefined;
 		const errorMessage = typeof raw.errorMessage === "string" ? truncateUtf8Prefix(raw.errorMessage, ARTIFACT_ERROR_BYTES) : undefined;
 		const stderr = typeof raw.stderr === "string" ? truncateUtf8Prefix(raw.stderr, ARTIFACT_STDERR_BYTES) : "";
+		const model = typeof raw.model === "string" ? normalizePersistedString(raw.model, MAX_ID_BYTES) : undefined;
 		return {
 			kind: "wabi-run",
 			version: 1,
 			id,
 			agent,
+			model,
 			task: truncateUtf8Prefix(raw.task, ARTIFACT_TASK_BYTES),
 			status: raw.status as RunArtifact["status"],
 			background: raw.background === true,
@@ -592,13 +597,16 @@ export interface ArchivedRun {
 	archived: true;
 	id: string;
 	agentName: string;
+	model?: string;
 	task: string;
 	status: "completed" | "failed" | "stopped";
+	background: boolean;
 	startedAt: number;
 	endedAt?: number;
 	transcript: { kind: string; text: string; at: number }[];
 	transcriptBytes: number;
 	handoffBytes?: number;
+	usage: { input: number; output: number; cost: number };
 }
 
 /** Build the archived view from an already-normalized artifact. */
@@ -607,17 +615,42 @@ export function archivedRunOf(artifact: RunArtifact): ArchivedRun {
 		archived: true,
 		id: artifact.id,
 		agentName: artifact.agent,
+		model: artifact.model,
 		task: artifact.task,
 		status: artifact.status as "completed" | "failed" | "stopped",
+		background: artifact.background === true,
 		startedAt: artifact.startedAt,
 		endedAt: artifact.endedAt,
 		transcript: artifact.transcript,
 		transcriptBytes: artifact.transcriptBytes,
 		handoffBytes: artifact.handoffBytes,
+		usage: artifact.usage,
 	};
 }
 
-export type CircuitState = "closed" | "open" | "half-open";
+/** Estimated spend, always labelled as an estimate; sub-cent amounts render as `< $0.01` instead of a misleading `$0.00`. */
+export function formatCost(cost: number): string {
+	if (!cost || !Number.isFinite(cost) || cost <= 0) return "";
+	if (cost < 0.01) return "<$0.01 est";
+	return `$${cost.toFixed(2)} est`;
+}
+
+/** List window start: center `size` rows around `selected` within `total`, clamped so the window never exceeds the list. */
+export function windowAround(total: number, size: number, selected: number): number {
+	return Math.max(0, Math.min(selected - Math.floor(size / 2), Math.max(0, total - size)));
+}
+
+/** Transcript view: the last `pageSize` lines at `scroll = 0` (newest always visible), clamped to the body length. */
+export function transcriptView(bodyLength: number, pageSize: number, scroll: number): { start: number; end: number } {
+	const maxScroll = Math.max(0, bodyLength - pageSize);
+	const end = bodyLength - Math.min(scroll, maxScroll);
+	return { start: Math.max(0, end - pageSize), end };
+}
+
+/** Terminal-height clamp used on every render path: the inspector never emits more lines than the real terminal has. */
+export function terminalClamp(lines: string[], rows: number | undefined): string[] {
+	return lines.slice(0, Math.max(0, rows ?? 30));
+}
 
 /** Fixed shared-circuit policy: two consecutive empty failures open; 60 s cooldown; one probe. */
 export const CIRCUIT_FAILURE_THRESHOLD = 2;

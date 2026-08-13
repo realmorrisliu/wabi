@@ -27,6 +27,7 @@ import {
 	finishUnresolvedRuns,
 	formatDuration,
 	formatHandoff,
+	formatCost,
 	HANDOFF_CONTRACT,
 	HANDOFF_ENVELOPE_BYTES,
 	isCompletedRun,
@@ -43,7 +44,10 @@ import {
 	runArtifactPath,
 	serializeRunArtifact,
 	sessionRunsDir,
+	terminalClamp,
+	transcriptView,
 	truncateUtf8,
+	windowAround,
 	writeRunArtifact,
 } from "./extensions/subagents/lib.ts";
 
@@ -55,6 +59,23 @@ function check(name: string, condition: boolean) {
 		console.log(`FAIL ${name}`);
 	}
 }
+
+// Compact run labels and estimated-cost formatting for the TUI.
+check("formatCost: zero and invalid render nothing", formatCost(0) === "" && formatCost(NaN) === "" && formatCost(-1) === "");
+check("formatCost: sub-cent amounts render as <$0.01 est, never a misleading $0.00", formatCost(0.0049) === "<$0.01 est");
+check("formatCost: normal amounts render as estimated dollars", formatCost(0.034905) === "$0.03 est" && formatCost(1.5) === "$1.50 est");
+check("formatCost: exactly one cent renders as $0.01 est", formatCost(0.01) === "$0.01 est");
+check("windowAround: centers the selection and clamps to the list bounds", windowAround(10, 3, 0) === 0 && windowAround(10, 3, 9) === 7 && windowAround(5, 3, 2) === 1 && windowAround(100, 30, 50) === 35 && windowAround(3, 8, 1) === 0);
+check("transcriptView: scroll 0 shows the newest lines; scroll clamps at the top (oldest page)", (() => {
+	const atRest = transcriptView(100, 10, 0);
+	const clamped = transcriptView(100, 10, 500);
+	const short = transcriptView(5, 10, 0);
+	return atRest.start === 90 && atRest.end === 100 && clamped.start === 0 && clamped.end === 10 && short.start === 0 && short.end === 5;
+})());
+check("terminalClamp: never emits more lines than the terminal, including zero-row terminals", (() => {
+	const lines = Array.from({ length: 10 }, (_, i) => `l${i}`);
+	return terminalClamp(lines, 0).length === 0 && terminalClamp(lines, 4).length === 4 && terminalClamp(lines, undefined).length === 10 && terminalClamp(lines, 100).length === 10;
+})());
 
 // Incremental JSONL parsing survives arbitrary chunk boundaries.
 const decoder = new JsonlDecoder();
@@ -220,10 +241,12 @@ try {
 		transcript: bigTranscript,
 		transcriptBytes: 0,
 		stderr: "secret stderr",
+		model: "kimi-coding/k3",
 		usage: { input: 1, output: 1, cost: 0 },
 	};
 	const serialized = serializeRunArtifact(artifact, 2_000);
 	const capped = parseRunArtifact(serialized)!;
+	check("serializeRunArtifact: model roundtrips and stays optional", capped.model === "kimi-coding/k3" && parseRunArtifact(JSON.stringify({ kind: "wabi-run", version: 1, id: "x", agent: "a", task: "t", status: "failed", startedAt: 1, transcript: [] }))?.model === undefined);
 	check("serializeRunArtifact: caps transcript to budget, dropping oldest", capped.transcriptBytes <= 2_000 && capped.transcript.length < bigTranscript.length && !capped.transcript.some((e) => e.text.startsWith("line 0")));
 	check("parseRunArtifact: roundtrip keeps failure metadata and stderr", capped.id === "worker-1-tok" && capped.exitCode === 1 && capped.stopReason === "error" && capped.hasStderr === true && capped.stderr === "secret stderr");
 	check("parseRunArtifact: rejects garbage and foreign files", parseRunArtifact("not json") === undefined && parseRunArtifact(JSON.stringify({ kind: "other" })) === undefined);

@@ -9,7 +9,7 @@ import { join } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { Key, Text, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Key, Text, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { activeOwnerTokens, createReadonlyRunDir, sweepReadonlyRuns } from "./cleanup.ts";
 import { resolveChildCwd, resolveRunCwd, type CloneBaseline } from "./clone.ts";
@@ -29,6 +29,7 @@ import {
 	discoverAgents,
 	ensureRunsDir,
 	finishUnresolvedRuns,
+	formatCost,
 	formatDuration,
 	formatHandoff,
 	isCompletedRun,
@@ -38,6 +39,9 @@ import {
 	loadRunArtifacts,
 	removeTempDirBestEffort,
 	sessionRunsDir,
+	terminalClamp,
+	transcriptView,
+	windowAround,
 	writeRunArtifact,
 } from "./lib.ts";
 
@@ -48,7 +52,6 @@ const FORCE_KILL_MS = 5_000;
 const ERROR_FALLBACK_MS = 1_000;
 /** After SIGKILL, how long to wait for the child's `close` event before finalizing the run ourselves. */
 const CLOSE_GRACE_MS = 500;
-const WIDGET_KEY = "wabi-subagents";
 const COMPLETION_TYPE = "wabi-subagent-complete";
 
 /** Owner tokens of live extension instances in this process, kept in a process-global registry (a `Symbol.for`-keyed set on globalThis, see cleanup.ts) so every copy of this module in the same JS realm — duplicate/aliased extension paths, reloads — shares one set. The startup stale-run sweep skips any run whose marker token is registered here, and deletes runs of previous instances of this same process (reloads, session switches) that are not — a pid + identity check alone cannot see a reload inside the same process. One process can hold several extension instances at once (pi re-invokes the factory on every reload and session switch, and duplicate/aliased extension paths load twice), so each instance registers its own token when it loads and deregisters it in its own session_shutdown — never in another instance's load, never clearing other tokens. pi awaits an instance's session_shutdown before the next instance loads, so a replaced instance's token is gone by the next session_start sweep (its leftover dirs become reclaimable via the same-process rule) while every live instance's runs stay protected. */
@@ -125,6 +128,8 @@ function isArchived(run: InspectorRun): boolean {
 interface RunView {
 	id: string;
 	agent: string;
+	model?: string;
+	cost: number;
 	task: string;
 	background: boolean;
 	status: RunStatus;
@@ -187,6 +192,8 @@ function viewOf(run: RunRecord): RunView {
 	return {
 		id: run.id,
 		agent: run.agent.name,
+		model: run.model ?? run.agent.model,
+		cost: run.usage.cost,
 		task: run.task,
 		background: run.background,
 		status: run.status,
@@ -204,7 +211,7 @@ function statusIcon(status: RunStatus): string {
 	switch (status) {
 		case "starting":
 		case "running":
-			return "⟳";
+			return "●";
 		case "stopping":
 			return "◐";
 		case "completed":
@@ -260,6 +267,17 @@ function formatBytes(bytes: number): string {
 	return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
+/** Wrap inspector lines in a bordered panel with a background so the rail reads as a distinct surface from the chat. `border`/`bg` are style functions (e.g. theme.fg/theme.bg). Rounded corners for the primary container; one column of padded background on each side so text never touches the border. The panel's total width is exactly `width`; over-long lines are truncated ANSI-safely to the content budget (padded from the truncated result). Below 3 columns the border is dropped and only the padded content rows remain. Exported so the offline smoke check can pin the width contract. */
+export function boxPanel(lines: string[], width: number, border: (text: string) => string, bg: (text: string) => string): string[] {
+	const inner = Math.max(1, width - 2); // border span between the corners
+	const pad = (line: string) => {
+		const content = truncateToWidth(line, Math.max(0, inner - 1));
+		return " " + content + " ".repeat(Math.max(0, inner - 1 - visibleWidth(content)));
+	};
+	if (width < 3) return lines.map((line) => bg(truncateToWidth(line, Math.max(0, width))));
+	return [border(`╭${"─".repeat(inner)}╮`), ...lines.map((line) => border("│") + bg(pad(line)) + border("│")), border(`╰${"─".repeat(inner)}╯`)];
+}
+
 export default function (pi: ExtensionAPI) {
 	const piAgentDir = getAgentDir();
 	const agentDefinitionsDir = join(piAgentDir, "agents");
@@ -277,8 +295,7 @@ export default function (pi: ExtensionAPI) {
 	const instanceToken = Math.random().toString(36).slice(2, 10);
 	activeOwnerTokens().add(instanceToken);
 	let latestCtx: ExtensionContext | undefined;
-	let widgetTimer: ReturnType<typeof setInterval> | undefined;
-	let inspectorOpen = false;
+	let headerTimer: ReturnType<typeof setInterval> | undefined;
 	let shuttingDown = false;
 
 	/** Durable per-parent-session postmortem record: full transcript + stderr kept locally only, mode 0600 under a mode-0700 session dir, written atomically. */
@@ -305,6 +322,7 @@ export default function (pi: ExtensionAPI) {
 				transcriptBytes: run.transcriptBytes,
 				stderr: run.stderr,
 				handoffBytes: run.handoffBytes,
+				model: run.model ?? run.agent.model,
 				usage: run.usage,
 			});
 		} catch (error) {
@@ -320,50 +338,68 @@ export default function (pi: ExtensionAPI) {
 		else if (run.status === "stopped") circuit.recordStopped();
 	}
 
-	function visibleWidgetRuns(now = Date.now()): RunRecord[] {
+	function visibleRuns(now = Date.now()): RunRecord[] {
 		return [...runs.values()].filter((run) => isActive(run) || (run.widgetUntil ?? 0) > now);
 	}
 
-	function refreshWidget(): void {
+	/** Persistent top bar: a compact two-line status that never takes focus away from the editor. Installed when runs become visible, removed when they clear; the component re-renders itself once per second. */
+	function refreshHeader(): void {
 		const ctx = latestCtx;
-		if (ctx?.mode !== "tui" || inspectorOpen) {
-			ctx?.ui.setWidget(WIDGET_KEY, undefined);
-			return;
-		}
-		const visible = visibleWidgetRuns();
+		if (ctx?.mode !== "tui") return;
+		const visible = visibleRuns();
 		if (visible.length === 0) {
-			ctx.ui.setWidget(WIDGET_KEY, undefined);
-			if (widgetTimer) clearInterval(widgetTimer);
-			widgetTimer = undefined;
+			if (headerTimer) {
+				clearInterval(headerTimer); // stop the flip monitor; the next ensureHeader restarts it when a run appears
+				headerTimer = undefined;
+				ctx.ui.setHeader(undefined);
+			}
 			return;
 		}
-
-		ctx.ui.setWidget(
-			WIDGET_KEY,
-			(_tui, theme) => {
-				const activeCount = visible.filter(isActive).length;
-				const lines = [theme.fg("dim", `subagents · ${activeCount} running`)];
-				for (const run of visible) {
-					const color = run.status === "failed" ? "error" : run.status === "completed" ? "success" : run.status === "stopped" ? "warning" : "accent";
-					const elapsed = formatDuration((run.endedAt ?? Date.now()) - run.startedAt);
-					const tool = run.currentTool ? ` · ${run.currentTool}` : "";
-					lines.push(
-						theme.fg(color, statusIcon(run.status)) +
-						` ${theme.fg("text", run.id)} ${theme.fg("muted", run.status + tool)} ${theme.fg("dim", elapsed)}`,
-					);
-				}
-				lines.push(theme.fg("dim", "Alt+S or /subagents to inspect"));
-				return new Text(lines.join("\n"), 0, 0);
-			},
-			{ placement: "belowEditor" },
-		);
+		if (headerTimer) return; // already installed; the component refreshes itself
+		ctx.ui.setHeader((tui, theme) => {
+			const renderTimer = setInterval(() => tui.requestRender(), 1_000);
+			const bgLine = (line: string, width: number) => theme.bg("customMessageBg", line + " ".repeat(Math.max(0, width - visibleWidth(line))));
+			return {
+				render(width: number): string[] {
+					const current = visibleRuns();
+					const activeCount = current.filter(isActive).length;
+					const doneCount = current.filter((run) => run.status === "completed").length;
+					const failedCount = current.filter((run) => run.status === "failed").length;
+					const totalCost = current.reduce((sum, run) => sum + (run.usage.cost || 0), 0);
+					const cost = formatCost(totalCost);
+					const narrow = width < 80;
+					const sep = theme.fg("muted", " · ");
+					const counts: string[] = [theme.fg("accent", `● ${activeCount} running`)];
+					if (doneCount > 0) counts.push(theme.fg("success", `✓ ${doneCount} done`));
+					if (failedCount > 0) counts.push(theme.fg("error", `✗ ${failedCount} failed`));
+					if (cost && width >= 100) counts.push(theme.fg("text", cost));
+					const title = `${theme.fg("accent", theme.bold("SUBAGENTS"))}  ${counts.join(sep)}`;
+					const lines = [bgLine(title, width)];
+					const perRun = current
+						.slice(0, narrow ? 2 : 3)
+						.map((run) => {
+							const color = run.status === "failed" ? "error" : run.status === "completed" ? "success" : run.status === "stopped" ? "warning" : "accent";
+							const elapsed = formatDuration((run.endedAt ?? Date.now()) - run.startedAt);
+							return `${theme.fg(color, statusIcon(run.status))} ${theme.fg("text", run.agent.name)}${narrow ? "" : ` ${theme.fg("muted", elapsed)}`}`;
+						})
+						.join(theme.fg("dim", " · "));
+					const more = current.length - (narrow ? 2 : 3);
+					lines.push(bgLine(perRun + (more > 0 ? theme.fg("dim", ` · +${more} more`) : ""), width));
+					if (width >= 60) lines.push(bgLine(theme.fg("dim", process.platform === "darwin" ? "⌘S 展开 subagent 面板 · /subagents" : "Alt+S 展开 subagent 面板 · /subagents"), width));
+					lines.push(theme.fg("borderMuted", "─".repeat(Math.max(1, width))));
+					return lines.map((line) => truncateToWidth(line, width));
+				},
+				invalidate() {},
+				dispose() {
+					clearInterval(renderTimer);
+				},
+			};
+		});
+		headerTimer = setInterval(refreshHeader, 1_000); // keeps the 0↔non-zero flip monitored
 	}
 
-	function ensureWidget(): void {
-		refreshWidget();
-		if (!widgetTimer && visibleWidgetRuns().length > 0) {
-			widgetTimer = setInterval(refreshWidget, 1_000);
-		}
+	function ensureHeader(): void {
+		refreshHeader();
 	}
 
 	function progressResult(run: RunRecord): AgentToolResult<SubagentDetails> {
@@ -453,7 +489,7 @@ export default function (pi: ExtensionAPI) {
 			run.liveToolResult = undefined;
 			append(run, "tool", `${run.currentTool} ${safeJson(event.args ?? {})}`);
 			emitUpdate(run, true);
-			ensureWidget();
+			ensureHeader();
 			return;
 		}
 
@@ -472,7 +508,7 @@ export default function (pi: ExtensionAPI) {
 			run.currentTool = undefined;
 			run.liveToolResult = undefined;
 			emitUpdate(run, true);
-			ensureWidget();
+			ensureHeader();
 		}
 	}
 
@@ -527,7 +563,7 @@ export default function (pi: ExtensionAPI) {
 		recordCircuitResult(run);
 		persistRun(run);
 		emitUpdate(run, true);
-		ensureWidget();
+		ensureHeader();
 		run.resolveDone(run);
 		if (run.background) handoffBackground(run);
 	}
@@ -576,7 +612,7 @@ export default function (pi: ExtensionAPI) {
 		};
 		runs.set(run.id, run);
 		emitUpdate(run, true);
-		ensureWidget();
+		ensureHeader();
 		return run;
 	}
 
@@ -667,7 +703,7 @@ export default function (pi: ExtensionAPI) {
 			});
 			child.on("close", (code, signal) => finishRun(run, code, signal));
 			emitUpdate(run, true);
-			ensureWidget();
+			ensureHeader();
 		} catch (error) {
 			// An aborted preparation (stop/reload/tool abort, or the shared prep deadline)
 			// settles as stopped — never an infrastructure empty failure, never providerError.
@@ -691,13 +727,13 @@ export default function (pi: ExtensionAPI) {
 			if (!run.finished) run.process?.kill("SIGKILL");
 		}, FORCE_KILL_MS);
 		emitUpdate(run, true);
-		ensureWidget();
+		ensureHeader();
 	}
 
 	function transcriptLines(run: { transcript: { kind: string; text: string; at: number }[]; liveText?: Map<number, string>; liveThinking?: Map<number, string>; liveToolResult?: string; currentTool?: string }, width: number, showThinking: boolean, theme: any): string[] {
 		const lines: string[] = [];
-		const add = (prefix: string, text: string, color: string) => {
-			const styledPrefix = theme.fg("dim", prefix);
+		const add = (prefix: string, text: string, color: string, prefixColor = "dim") => {
+			const styledPrefix = theme.fg(prefixColor, prefix);
 			const available = Math.max(1, width - prefix.length);
 			const wrapped = wrapTextWithAnsi(theme.fg(color, text), available);
 			for (let index = 0; index < wrapped.length; index++) {
@@ -707,11 +743,11 @@ export default function (pi: ExtensionAPI) {
 
 		for (const entry of run.transcript) {
 			if (entry.kind === "thinking" && !showThinking) continue;
-			if (entry.kind === "thinking") add("think › ", entry.text, "dim");
-			else if (entry.kind === "text") add("agent › ", entry.text, "text");
-			else if (entry.kind === "tool") add("tool  › ", entry.text, "accent");
-			else if (entry.kind === "tool-result") add("result› ", entry.text, "muted");
-			else add("system› ", entry.text, "warning");
+			if (entry.kind === "thinking") add("think › ", entry.text, "dim", "muted");
+			else if (entry.kind === "text") add("agent › ", entry.text, "text", "accent");
+			else if (entry.kind === "tool") add("tool  › ", entry.text, "toolOutput", "toolTitle");
+			else if (entry.kind === "tool-result") add("result› ", entry.text, "muted", "muted");
+			else add("system› ", entry.text, "warning", "warning");
 		}
 		if (showThinking) {
 			for (const thinking of run.liveThinking?.values() ?? []) if (thinking) add("think › ", thinking, "dim");
@@ -721,22 +757,29 @@ export default function (pi: ExtensionAPI) {
 		return lines.length > 0 ? lines : [theme.fg("dim", "(no transcript yet)")];
 	}
 
-	async function openInspector(ctx: ExtensionContext): Promise<void> {
+	const groupOf = (run: InspectorRun): number => (isActive(run) ? 1 : isArchived(run) ? 3 : 2);
+	const agentLabel = (run: InspectorRun): string => ("agentName" in run ? run.agentName : run.agent.name);
+	const runModel = (run: InspectorRun): string | undefined => (isArchived(run) ? run.model : run.model ?? run.agent.model);
+	const colorOf = (run: InspectorRun): string => (run.status === "failed" ? "error" : run.status === "completed" ? "success" : run.status === "stopped" ? "warning" : "accent");
+	const GROUP_NAMES = ["all", "active", "review", "archived"];
+	const panelBorder = (theme: any) => (text: string) => theme.fg("borderMuted", text);
+	const panelBg = (theme: any) => (text: string) => theme.bg("customMessageBg", text);
+	const box = (theme: any, lines: string[], width: number): string[] => boxPanel(lines, width, panelBorder(theme), panelBg(theme));
+
+	/** Expandable top panel: the persistent subagent rail. ↑↓ selects, Enter opens the full detail page (Esc returns here), Esc closes the rail. */
+	async function openRail(ctx: ExtensionContext): Promise<void> {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify("/subagents requires interactive mode", "error");
 			return;
 		}
-		inspectorOpen = true;
-		refreshWidget();
-		let timer: ReturnType<typeof setInterval> | undefined;
-		try {
-			await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+		let selection: string | undefined;
+		do {
+			selection = await ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
 				let selectedId = [...runs.keys()].at(-1) ?? [...history.keys()].at(-1);
-				let scroll = 0;
-				let showThinking = false;
 				let confirmStop: string | undefined;
+				let groupFilter = 0; // 0 all · 1 active · 2 review · 3 archived
 
-				const ordered = () => [...runs.values(), ...history.values()];
+				const ordered = () => [...runs.values(), ...history.values()].filter((run) => groupFilter === 0 || groupOf(run) === groupFilter);
 				const selected = () => {
 					const all = ordered();
 					return all.find((run) => run.id === selectedId) ?? all.at(-1);
@@ -746,48 +789,76 @@ export default function (pi: ExtensionAPI) {
 					if (all.length === 0) return;
 					const current = Math.max(0, all.findIndex((run) => run.id === selectedId));
 					selectedId = all[Math.max(0, Math.min(all.length - 1, current + delta))].id;
-					scroll = 0;
+					confirmStop = undefined;
+				};
+				const cycleGroup = (delta: number) => {
+					groupFilter = (groupFilter + delta + 4) % 4;
+					const all = ordered();
+					selectedId = all.at(-1)?.id ?? selectedId;
 					confirmStop = undefined;
 				};
 
-				timer = setInterval(() => tui.requestRender(), 250);
+				const timer = setInterval(() => tui.requestRender(), 250);
 				return {
 					render(width: number): string[] {
 						const all = ordered();
-						const archivedCount = history.size;
-						const lines = [theme.fg("accent", theme.bold(`Subagents · ${all.length}${archivedCount > 0 ? ` (${archivedCount} archived from this session's run history)` : ""}`))];
+						const innerW = Math.max(1, width - 4); // boxPanel inner width (border + padding)
+						const rows = Math.max(4, Math.floor((process.stdout.rows ?? 30) / 2) - 4);
+						const narrow = width < 80;
+						const total = [...runs.values(), ...history.values()].length;
+						const titleLeft = `${theme.fg("accent", theme.bold("SUBAGENTS"))} ${theme.fg("muted", `${total} total${history.size > 0 ? ` · ${history.size} archived` : ""}`)}`;
+						const tabs = GROUP_NAMES.map((name, index) => (index === groupFilter ? theme.fg("accent", theme.bold(`[${name}]`)) : theme.fg("dim", name))).join(" ");
+						const out = [titleLeft + (narrow ? "" : " ".repeat(Math.max(1, innerW - visibleWidth(titleLeft) - visibleWidth(tabs))) + tabs)];
+
 						if (all.length === 0) {
-							lines.push("", theme.fg("dim", "No runs in this session."), "", theme.fg("dim", "Esc close"));
-							return lines.map((line) => truncateToWidth(line, width));
+							out.push("", theme.fg("dim", "No runs in this group."), "", theme.fg("dim", "←/→ switch group · Esc close"));
+							return box(theme, out, width).map((line) => truncateToWidth(line, width));
 						}
 
 						const current = selected()!;
 						selectedId = current.id;
-						const selectedIndex = all.findIndex((run) => run.id === current.id);
-						const listStart = Math.max(0, Math.min(selectedIndex - 2, Math.max(0, all.length - 5)));
-						for (const run of all.slice(listStart, listStart + 5)) {
-							const marker = run.id === current.id ? theme.fg("accent", ">") : " ";
-							const color = run.status === "failed" ? "error" : run.status === "completed" ? "success" : run.status === "stopped" ? "warning" : "accent";
-							const elapsed = formatDuration((run.endedAt ?? Date.now()) - run.startedAt);
-							const tool = "currentTool" in run && run.currentTool ? ` · ${run.currentTool}` : "";
-							lines.push(`${marker} ${theme.fg(color, statusIcon(run.status))} ${run.id} ${theme.fg("muted", run.status + (isArchived(run) ? " · archived" : "") + tool)} ${theme.fg("dim", elapsed)}`);
+						const leftLines: string[] = [];
+						const leftRunAt = new Map<number, InspectorRun>();
+						const groups: { filter: number; label: (count: number) => string; color: string }[] = [
+							{ filter: 1, label: (count) => `● ACTIVE (${count})`, color: "accent" },
+							{ filter: 2, label: (count) => `○ NEEDS REVIEW (${count})`, color: "muted" },
+							{ filter: 3, label: (count) => `▽ ARCHIVED (${count})`, color: "dim" },
+						];
+						for (const group of groups) {
+							if (groupFilter !== 0 && groupFilter !== group.filter) continue;
+							const members = all.filter((run) => groupOf(run) === group.filter);
+							if (members.length === 0 && groupFilter === 0) continue;
+							if (leftLines.length > 0) leftLines.push(""); // blank line between groups
+							leftLines.push(theme.fg(group.color, theme.bold(group.label(members.length))));
+							for (const run of members) {
+								leftRunAt.set(leftLines.length, run);
+								leftLines.push("");
+							}
 						}
-						lines.push(theme.fg("dim", "─".repeat(Math.max(1, width))), theme.fg("muted", `Task: ${current.task}`));
-
-						const metrics = current.transcriptBytes
-							? `transcript ${formatBytes(current.transcriptBytes)} · handoff ${current.handoffBytes ? formatBytes(current.handoffBytes) : "—"} · isolation ${runIsolationPct(current) ?? "—"}%`
-							: "";
-						if (metrics) lines.push(theme.fg("dim", metrics));
-						const body = transcriptLines(current, width, showThinking, theme);
-						const pageSize = Math.max(5, (process.stdout.rows ?? 30) - Math.min(all.length, 5) - 8);
-						const maxScroll = Math.max(0, body.length - pageSize);
-						scroll = Math.min(scroll, maxScroll);
-						const end = body.length - scroll;
-						lines.push(...body.slice(Math.max(0, end - pageSize), end));
-						lines.push(theme.fg("dim", "─".repeat(Math.max(1, width))));
-						if (confirmStop === current.id) lines.push(theme.fg("warning", "Stop this run? y confirm · any other key cancel"));
-						else lines.push(theme.fg("dim", `↑↓ select · PgUp/PgDn scroll · Ctrl+T thinking ${showThinking ? "on" : "off"} · s stop · Esc close`));
-						return lines.map((line) => truncateToWidth(line, width));
+						// Fixed column widths computed once over the visible members: marker/icon fixed, name/model padded, elapsed right-aligned.
+						const members = [...leftRunAt.values()];
+						const nameW = narrow ? 0 : Math.min(24, Math.max(...members.map((run) => run.id.replace(/-[^-]+$/, "").length)));
+						const modelW = narrow ? 0 : Math.min(20, Math.max(...members.map((run) => (runModel(run) ?? "").length)));
+						const elapsedW = Math.max(...members.map((run) => formatDuration((run.endedAt ?? Date.now()) - run.startedAt).length));
+						const runLine = (run: InspectorRun): string => {
+							const shortId = run.id.replace(/-[^-]+$/, "");
+							const selected = run.id === current.id;
+							const marker = selected ? theme.fg("accent", "▸") : " ";
+							const icon = theme.fg(colorOf(run), statusIcon(run.status));
+							const elapsed = formatDuration((run.endedAt ?? Date.now()) - run.startedAt);
+							const running = isActive(run);
+							let line = `${marker} ${icon} ${nameW > 0 ? theme.fg("text", shortId.padEnd(nameW)) + " " : ""}${modelW > 0 ? theme.fg("muted", (runModel(run) ?? "").padEnd(modelW)) + " " : ""}${theme.fg(running ? "accent" : "text", elapsed.padStart(elapsedW))}`;
+							if (selected) line = theme.bg("selectedBg", line + " ".repeat(Math.max(0, innerW - visibleWidth(line))));
+							return line;
+						};
+						for (const [lineIndex, run] of leftRunAt) leftLines[lineIndex] = runLine(run);
+						const selectedLine = [...leftRunAt.entries()].find(([, run]) => run.id === current.id)?.[0] ?? 0;
+						const listStart = windowAround(leftLines.length, rows - 2, selectedLine);
+						out.push(...leftLines.slice(listStart, listStart + rows - 2));
+						out.push("");
+						if (confirmStop === current.id) out.push(theme.fg("warning", "Stop this run? y confirm · any other key cancel"));
+						else out.push(theme.fg("dim", `↑↓ select · Enter 详情 · ←/→ group ${GROUP_NAMES[groupFilter]} · s stop · Esc close`));
+						return box(theme, out, width).map((line) => truncateToWidth(line, width));
 					},
 					handleInput(data: string): void {
 						const current = selected();
@@ -801,22 +872,100 @@ export default function (pi: ExtensionAPI) {
 							return;
 						}
 						if (matchesKey(data, Key.escape)) done(undefined);
+						else if (matchesKey(data, Key.enter) && current) done(current.id);
 						else if (matchesKey(data, Key.up)) move(-1);
 						else if (matchesKey(data, Key.down)) move(1);
-						else if (matchesKey(data, Key.pageUp)) scroll += Math.max(5, (process.stdout.rows ?? 30) - 12);
-						else if (matchesKey(data, Key.pageDown)) scroll = Math.max(0, scroll - Math.max(5, (process.stdout.rows ?? 30) - 12));
-						else if (matchesKey(data, Key.ctrl("t"))) showThinking = !showThinking;
+						else if (matchesKey(data, Key.left)) cycleGroup(-1);
+						else if (matchesKey(data, Key.right)) cycleGroup(1);
 						else if (data === "s" && current && isActive(current)) confirmStop = current.id;
 						tui.requestRender();
 					},
 					invalidate() {},
+					dispose() {
+						clearInterval(timer);
+					},
 				};
+			}, {
+				overlay: true,
+				overlayOptions: () => {
+					const termWidth = process.stdout.columns ?? 100;
+					const width = termWidth < 80 ? "100%" : Math.min(110, Math.max(64, Math.floor(termWidth * 0.85)));
+					return { anchor: "top-center", width, maxHeight: "55%", margin: { top: 1 } };
+				},
 			});
-		} finally {
-			if (timer) clearInterval(timer);
-			inspectorOpen = false;
-			ensureWidget();
-		}
+			if (selection) await openDetail(ctx, selection);
+		} while (selection !== undefined);
+	}
+
+	/** Full-screen detail page for one run: header, metrics, transcript. Esc returns to the rail. */
+	async function openDetail(ctx: ExtensionContext, runId: string): Promise<void> {
+		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+			let scroll = 0;
+			let showThinking = false;
+			let confirmStop: string | undefined;
+			const timer = setInterval(() => tui.requestRender(), 250);
+			return {
+				render(width: number): string[] {
+					const all = [...runs.values(), ...history.values()];
+					const current = all.find((run) => run.id === runId) ?? all.at(-1);
+					if (!current) return terminalClamp([theme.fg("dim", "Run not found — Esc close")], process.stdout.rows);
+					const rows = Math.max(1, (process.stdout.rows ?? 30) - 3);
+					const narrow = width < 80;
+					const out: string[] = [];
+					const model = narrow ? undefined : runModel(current);
+					const cost = formatCost(current.usage.cost);
+					const head: string[] = [];
+					head.push(`${theme.fg("accent", theme.bold(agentLabel(current)))}${model ? ` ${theme.fg("muted", "· " + model)}` : ""}`);
+					const statusText = `${statusIcon(current.status)} ${current.status}${isArchived(current) ? " · archived" : ""}`;
+					head.push(`${theme.fg(colorOf(current), statusText)} · ${formatDuration((current.endedAt ?? Date.now()) - current.startedAt)}${cost ? ` · ${theme.fg("text", cost)}` : ""}${current.background ? ` · ${theme.fg("muted", "background")}` : ""}${("currentTool" in current && current.currentTool && narrow) ? ` · ${theme.fg("accent", `tool: ${current.currentTool}`)}` : ""}`);
+					if (!narrow && "currentTool" in current && current.currentTool) head.push(theme.fg("accent", `tool: ${current.currentTool}`));
+					const taskWrapped = wrapTextWithAnsi(current.task, Math.max(1, width - 8));
+					taskWrapped.slice(0, 5).forEach((line, index) => {
+						head.push(index === 0 ? `${theme.fg("accent", theme.bold("Task: "))}${theme.fg("text", line)}` : `      ${theme.fg("text", line)}`);
+					});
+					if (taskWrapped.length > 5) head.push(theme.fg("dim", "      …"));
+					const metrics = current.transcriptBytes
+						? `transcript ${formatBytes(current.transcriptBytes)} · handoff ${current.handoffBytes ? formatBytes(current.handoffBytes) : "—"} · isolation ${runIsolationPct(current) ?? "—"}%`
+						: "";
+					if (metrics && !narrow) head.push(theme.fg("dim", metrics));
+					// Header block as a background band, same visual language as the top bar.
+					out.push(...head.map((line) => theme.bg("customMessageBg", " " + line + " ".repeat(Math.max(0, width - 1 - visibleWidth(line))))));
+					out.push(theme.fg("borderMuted", "─".repeat(Math.max(1, width))));
+					const body = transcriptLines(current, width, showThinking, theme);
+					const detailHeader = out.length;
+					const pageSize = Math.max(0, rows - detailHeader);
+					scroll = Math.min(scroll, Math.max(0, body.length - pageSize));
+					const view = transcriptView(body.length, pageSize, scroll);
+					out.push(...body.slice(view.start, view.end));
+					out.push(theme.fg("borderMuted", "─".repeat(Math.max(1, width))));
+					if (confirmStop === current.id) out.push(theme.fg("warning", "Stop this run? y confirm · any other key cancel"));
+					else out.push(theme.fg("dim", `PgUp/PgDn scroll · Ctrl+T thinking ${showThinking ? "on" : "off"} · s stop · Esc 返回`));
+					return terminalClamp(out, process.stdout.rows).map((line) => truncateToWidth(line, width));
+				},
+				handleInput(data: string): void {
+					const current = [...runs.values(), ...history.values()].find((run) => run.id === runId);
+					if (confirmStop) {
+						if (data === "y" || matchesKey(data, Key.enter)) {
+							const live = runs.get(confirmStop);
+							if (live) stopRun(live, "stopped by user");
+						}
+						confirmStop = undefined;
+						tui.requestRender();
+						return;
+					}
+					if (matchesKey(data, Key.escape)) done(undefined);
+					else if (matchesKey(data, Key.pageUp)) scroll += Math.max(5, (process.stdout.rows ?? 30) - 12);
+					else if (matchesKey(data, Key.pageDown)) scroll = Math.max(0, scroll - Math.max(5, (process.stdout.rows ?? 30) - 12));
+					else if (matchesKey(data, Key.ctrl("t"))) showThinking = !showThinking;
+					else if (data === "s" && current && isActive(current)) confirmStop = current.id;
+					tui.requestRender();
+				},
+				invalidate() {},
+				dispose() {
+					clearInterval(timer);
+				},
+			};
+		});
 	}
 
 	pi.registerMessageRenderer(COMPLETION_TYPE, (message, options, theme) => {
@@ -919,7 +1068,12 @@ export default function (pi: ExtensionAPI) {
 
 		renderCall(args, theme) {
 			const mode = args.background ? "background" : "foreground";
-			return new Text(`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", args.agent)} ${theme.fg("muted", mode)}\n  ${theme.fg("dim", args.task)}`, 0, 0);
+			const model = discoverAgents(agentDefinitionsDir).find((agent) => agent.name === args.agent)?.model;
+			return new Text(
+				`${theme.fg("toolTitle", theme.bold("subagent "))}${theme.fg("accent", args.agent)} ${theme.fg("muted", mode)}${model ? theme.fg("dim", ` · ${model}`) : ""}\n  ${theme.fg("dim", args.task)}`,
+				0,
+				0,
+			);
 		},
 
 		renderResult(result, { expanded }, theme) {
@@ -931,7 +1085,9 @@ export default function (pi: ExtensionAPI) {
 			}
 			const color = run.status === "failed" ? "error" : run.status === "completed" ? "success" : run.status === "stopped" ? "warning" : "accent";
 			const elapsed = formatDuration((run.endedAt ?? Date.now()) - run.startedAt);
-			let text = `${theme.fg(color, statusIcon(run.status))} ${theme.fg("toolTitle", run.id)} ${theme.fg("muted", run.status)} ${theme.fg("dim", elapsed)}`;
+			const cost = formatCost(run.cost);
+			let text = `${theme.fg(color, statusIcon(run.status))} ${theme.fg("toolTitle", run.id)} ${theme.fg("muted", run.status)} ${theme.fg("dim", elapsed)}${cost ? theme.fg("dim", ` · ${cost}`) : ""}`;
+			if (run.model) text += ` ${theme.fg("dim", `· ${run.model}`)}`;
 			if (run.currentTool) text += `\n${theme.fg("dim", `  ${run.currentTool}`)}`;
 			if (expanded && run.lastOutput) text += `\n\n${theme.fg("toolOutput", run.lastOutput)}`;
 			return new Text(text, 0, 0);
@@ -939,12 +1095,17 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("subagents", {
-		description: "Inspect live and completed subagents from this session",
-		handler: async (_args, ctx) => openInspector(ctx),
+		description: "Expand the subagent rail (grouped run list; Enter opens detail)",
+		handler: async (_args, ctx) => openRail(ctx),
 	});
+	pi.registerShortcut("super+s", {
+		description: "Expand the subagent rail",
+		handler: async (ctx) => openRail(ctx),
+	});
+	// alt+s works on Linux/Windows; on macOS Option+S types "ß" in the editor, so super+s is the primary binding.
 	pi.registerShortcut("alt+s", {
-		description: "Open the subagent inspector",
-		handler: async (ctx) => openInspector(ctx),
+		description: "Expand the subagent rail",
+		handler: async (ctx) => openRail(ctx),
 	});
 
 	pi.on("session_start", (_event, ctx) => {
@@ -1009,9 +1170,9 @@ export default function (pi: ExtensionAPI) {
 			// (finishRun already removed each run's temp dir best-effort; the duplicate shutdown rm was dropped.)
 			finishUnresolvedRuns(active, (run) => finishRun(run, null, "SIGKILL"));
 		}
-		if (widgetTimer) clearInterval(widgetTimer);
-		widgetTimer = undefined;
-		ctx.ui.setWidget(WIDGET_KEY, undefined);
+		if (headerTimer) clearInterval(headerTimer);
+		headerTimer = undefined;
+		ctx.ui.setHeader(undefined);
 		runs.clear();
 		history.clear();
 		runsDir = undefined;

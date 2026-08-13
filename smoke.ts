@@ -39,6 +39,7 @@ if (!process.env.WABI_SMOKE_RUNNER) {
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { OWNER_MARKER_NAME, readonlyRunsRoot, runDirName } from "./extensions/subagents/cleanup.ts";
 
 // Hermetic agent set: point the extension's agent dir (PI_CODING_AGENT_DIR,
@@ -56,7 +57,7 @@ for (const entry of readdirSync(join(dirname(fileURLToPath(import.meta.url)), "a
 }
 process.env.PI_CODING_AGENT_DIR = smokeAgentDir;
 process.on("exit", () => rmSync(smokeAgentDir, { recursive: true, force: true }));
-const { default: registerExtension } = await import("./extensions/subagents/index.ts");
+const { default: registerExtension, boxPanel } = await import("./extensions/subagents/index.ts");
 
 let failures = 0;
 function check(name: string, condition: boolean) {
@@ -78,6 +79,22 @@ const stub = {
 } as unknown as ExtensionAPI;
 
 registerExtension(stub);
+
+// boxPanel width contract: panel total width equals the requested width for short, long, ANSI, and wide-char content; borders never drift.
+{
+	const id = (text: string) => text;
+	const short = boxPanel(["a", "bb"], 8, id, id);
+	const long = boxPanel(["abcdefghij"], 8, id, id);
+	const ansi = boxPanel(["\u001b[31mred\u001b[39m"], 8, id, id);
+	const wide = boxPanel(["中中"], 8, id, id);
+	const mixed = boxPanel(["a中中a"], 8, id, id); // overlong mixed-width: truncation must stay inside the budget
+	const degenerate = boxPanel(["abc"], 2, id, id);
+	check("boxPanel: total width equals the requested width for short content", short.length === 4 && short[0] === "╭──────╮" && short[1] === "│ a    │" && short[3] === "╰──────╯");
+	check("boxPanel: over-long content is truncated to the content budget", visibleWidth(long[1]) === 8 && long[1].endsWith("│"));
+	check("boxPanel: ANSI-styled and wide-char content keeps the panel width", visibleWidth(ansi[1]) === 8 && visibleWidth(wide[1]) === 8);
+	check("boxPanel: overlong mixed-width content stays within the budget", visibleWidth(mixed[1]) === 8 && mixed[1].endsWith("│"));
+	check("boxPanel: below 3 columns the border is dropped, content stays in width", degenerate.length === 1 && visibleWidth(degenerate[0]) === 2);
+}
 
 const tool = registered.tool as { name?: string; description?: string; promptGuidelines?: string[] } | undefined;
 check("extension loads and registers the subagent tool", tool?.name === "subagent");
@@ -265,14 +282,14 @@ try {
 	}
 }
 
-// Fake lifecycle: with no active runs, session shutdown must settle and clear the widget.
+// Fake lifecycle: with no active runs, session shutdown must settle and clear the header.
 const handlers = registered.handlers as Record<string, unknown>;
-const shutdown = handlers.session_shutdown as ((event: unknown, ctx: { ui: { setWidget: (key: string, value: unknown) => void } }) => Promise<void>) | undefined;
-const widgetClears: string[] = [];
+const shutdown = handlers.session_shutdown as ((event: unknown, ctx: { ui: { setHeader: (content: unknown) => void } }) => Promise<void>) | undefined;
+const headerClears: string[] = [];
 const shutdownSettled = typeof shutdown === "function"
-	? await shutdown({}, { ui: { setWidget: (key: string, value: unknown) => { if (value === undefined) widgetClears.push(key); } } }).then(() => true).catch(() => false)
+	? await shutdown({}, { ui: { setHeader: (content: unknown) => { if (content === undefined) headerClears.push("header"); } } }).then(() => true).catch(() => false)
 	: false;
-check("shutdown: fake lifecycle settles and clears the widget", shutdownSettled && widgetClears.includes("wabi-subagents"));
+check("shutdown: fake lifecycle settles and clears the header", shutdownSettled && headerClears.includes("header"));
 
 if (failures > 0) {
 	console.error(`\n${failures} smoke check(s) FAILED`);
