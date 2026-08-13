@@ -44,7 +44,7 @@ import { OWNER_MARKER_NAME, readonlyRunsRoot, runDirName } from "./extensions/su
 
 // Hermetic agent set: point the extension's agent dir (PI_CODING_AGENT_DIR,
 // honored by getAgentDir) at a temp dir with this repo's agents symlinked in,
-// so discoverAgents sees exactly planner/reviewer/creative-worker — never the
+// so discoverAgents sees exactly research-plan/reviewer/creative-worker — never the
 // installed global agent dir, which can lag or carry stale (dangling) agents.
 // Auth/models/runs-archive paths follow the same temp dir and never touch the
 // user's real agent dir. Set BEFORE the extension registers.
@@ -132,7 +132,7 @@ try {
 	let error: unknown;
 	let result: unknown;
 	try {
-		result = await execute?.("t4", { agent: "planner", task: "probe", background: true }, undefined, undefined, stubCtx);
+		result = await execute?.("t4", { agent: "research-plan", task: "probe", background: true }, undefined, undefined, stubCtx);
 	} catch (caught) {
 		error = caught;
 	}
@@ -151,7 +151,7 @@ try {
 	rmSync(fakeBinDir, { recursive: true, force: true });
 }
 
-// Extension-integration fail-closed path: launching a read-only agent (planner) with a
+// Extension-integration fail-closed path: launching a read-only agent (research-plan) with a
 // non-Git cwd must fail closed with the bounded handoff — never spawn a child, never
 // fall back to the shared cwd, and never leak raw git stderr into the handoff.
 const nonGitCwd = mkdtempSync(join(tmpdir(), "wabi-smoke-"));
@@ -165,7 +165,7 @@ try {
 	};
 	let error: unknown;
 	try {
-		await execute?.("t1", { agent: "planner", task: "probe" }, undefined, undefined, stubCtx);
+		await execute?.("t1", { agent: "research-plan", task: "probe" }, undefined, undefined, stubCtx);
 	} catch (caught) {
 		error = caught;
 	}
@@ -193,7 +193,7 @@ try {
 	const stubCtx = { cwd: repoCwd, mode: "json", isProjectTrusted: () => false, ui: { setWidget: () => {} } };
 	let error: unknown;
 	try {
-		await execute?.("t2", { agent: "planner", task: "probe" }, controller.signal, undefined, stubCtx);
+		await execute?.("t2", { agent: "research-plan", task: "probe" }, controller.signal, undefined, stubCtx);
 	} catch (caught) {
 		error = caught;
 	}
@@ -213,7 +213,7 @@ try {
 	const stubCtx = { cwd: backgroundCwd, mode: "rpc", isProjectTrusted: () => false, ui: { setWidget: () => {} } };
 	let error: unknown;
 	try {
-		await execute?.("t3", { agent: "planner", task: "probe", background: true }, undefined, undefined, stubCtx);
+		await execute?.("t3", { agent: "research-plan", task: "probe", background: true }, undefined, undefined, stubCtx);
 	} catch (caught) {
 		error = caught;
 	}

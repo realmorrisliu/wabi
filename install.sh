@@ -16,7 +16,7 @@ done
 
 # stale prompts and symlinks from earlier versions
 rm -f ~/.pi/agent/prompts/implement-and-review.md ~/.pi/agent/prompts/implement.md
-rm -f ~/.pi/agent/prompts/scout-and-plan.md ~/.pi/agent/prompts/work.md
-rm -f ~/.pi/agent/agents/worker.md ~/.pi/agent/agents/scout.md
+rm -f ~/.pi/agent/prompts/scout-and-plan.md ~/.pi/agent/prompts/work.md ~/.pi/agent/prompts/plan.md
+rm -f ~/.pi/agent/agents/worker.md ~/.pi/agent/agents/scout.md ~/.pi/agent/agents/planner.md
 
 echo "wabi installed. Run /reload in pi to load the extension."

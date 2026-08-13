@@ -28,20 +28,20 @@ try {
 	mkdirSync(agentsDir, { recursive: true });
 	mkdirSync(promptsDir, { recursive: true });
 	for (const stale of ["worker.md", "scout.md"]) {
-		symlinkSync(join(repoRoot, "agents", "planner.md"), join(agentsDir, stale));
+		symlinkSync(join(repoRoot, "agents", "research-plan.md"), join(agentsDir, stale));
 	}
-	for (const stale of ["work.md", "implement.md", "implement-and-review.md", "scout-and-plan.md"]) {
-		symlinkSync(join(repoRoot, "prompts", "plan.md"), join(promptsDir, stale));
+	for (const stale of ["work.md", "implement.md", "implement-and-review.md", "scout-and-plan.md", "plan.md"]) {
+		symlinkSync(join(repoRoot, "prompts", "research-plan.md"), join(promptsDir, stale));
 	}
 
 	execFileSync("bash", ["install.sh"], { cwd: repoRoot, env: { ...process.env, HOME: home } });
 
 	const agents = readdirSync(agentsDir).filter((f) => f.endsWith(".md")).sort();
 	const prompts = readdirSync(promptsDir).filter((f) => f.endsWith(".md")).sort();
-	check("install: agent set is exactly planner/reviewer/creative-worker", agents.join(",") === "creative-worker.md,planner.md,reviewer.md");
+	check("install: agent set is exactly research-plan/reviewer/creative-worker", agents.join(",") === "creative-worker.md,research-plan.md,reviewer.md");
 	check("install: stale worker/scout agents removed", !agents.includes("worker.md") && !agents.includes("scout.md"));
-	check("install: /plan prompt installed, /work gone", prompts.includes("plan.md") && !prompts.includes("work.md"));
-	check("install: retired prompts removed", !prompts.some((p) => ["implement.md", "implement-and-review.md", "scout-and-plan.md"].includes(p)));
+	check("install: /research-plan prompt installed, /work gone", prompts.includes("research-plan.md") && !prompts.includes("work.md"));
+	check("install: retired prompts removed", !prompts.some((p) => ["implement.md", "implement-and-review.md", "scout-and-plan.md", "plan.md"].includes(p)));
 } finally {
 	rmSync(home, { recursive: true, force: true });
 }

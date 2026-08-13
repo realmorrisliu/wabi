@@ -105,7 +105,7 @@ interface RunRecord {
 	tempDir?: string;
 	/** Cancellation for clone preparation: stopRun aborts it so prep terminates (killing the current git child) and settles as stopped. */
 	abortPrep?: AbortController;
-	/** Snapshot baseline for read-only runs (planner, reviewer) that execute in a per-run disposable clone. */
+	/** Snapshot baseline for read-only runs (research-plan, reviewer) that execute in a per-run disposable clone. */
 	baseline?: CloneBaseline;
 	stopRequested?: string;
 	suppressHandoff: boolean;
@@ -665,7 +665,7 @@ export default function (pi: ExtensionAPI) {
 			const promptFile = join(run.tempDir, "prompt.md");
 			writeFileSync(promptFile, composeSystemPrompt(agent.systemPrompt), { encoding: "utf8", mode: 0o600 });
 			args.push("--append-system-prompt", promptFile);
-			// Read-only agents (planner, reviewer) run in a per-run disposable clone: their git
+			// Read-only agents (research-plan, reviewer) run in a per-run disposable clone: their git
 			// state is independent of the parent's and the clone inherits the temp dir's
 			// cleanup. Preparation is asynchronous and cancelable (stop/reload/tool abort
 			// terminate it under one shared total deadline); failure throws and fails the run
@@ -990,19 +990,19 @@ export default function (pi: ExtensionAPI) {
 		name: "subagent",
 		label: "Subagent (wabi)",
 		description: `Delegate substantial independent work to configured child agents (${agentSummary}). Foreground subagent runs stream progress and block until done; background runs return immediately and accept read-only agents only, with the final result steered back before the parent's next model turn. Issue multiple sibling subagent calls in one message for independent blocking work. At most four subagents may run, and only one write-capable subagent at a time; write-capable subagents (creative-worker) must run in the foreground.`,
-		promptSnippet: "Delegate substantial independent planning, review, or creative work to isolated child agents",
+		promptSnippet: "Delegate substantial independent research, planning, review, or creative work to isolated child agents",
 		promptGuidelines: [
-			"The parent agent owns exploration and ordinary implementation: keep non-atomic implementation in the parent, and do not delegate to subagents work that is small, tightly coupled, or already fully understood. Delegate only when isolation, parallelism, or a specialist child pays for the handoff.",
-			"Before a complex or uncertain task, ask the read-only `planner` subagent for an implementation plan — foreground when the plan gates the next step, background otherwise. Implement the adopted plan in the parent; planner runs are read-only and never implement.",
+			"The parent agent owns ordinary implementation: keep non-atomic implementation in the parent, and do not delegate to subagents work that is small, tightly coupled, or already fully understood. Delegate only when isolation, parallelism, or a specialist child pays for the handoff.",
+			"For a complex or uncertain task, delegate Research & Plan to the read-only `research-plan` subagent before you explore or implement — it owns the deep dive and returns an implementation plan with evidence. Do not pre-explore the task yourself: the handoff is the exploration. Foreground when the plan gates the next step, background otherwise. Implement the adopted plan in the parent; research-plan runs are read-only and never implement.",
 			"Use the `creative-worker` subagent for visual, interactive, web, and 3D builds; use the `reviewer` subagent for an independent correctness and complexity pass after risky changes.",
 			"Issue sibling foreground subagent calls in one assistant message for independent blocking work so they run in parallel; do not duplicate delegated scope across subagents.",
-			"Use subagent in background only for read-only, nonblocking work (planner, reviewer); write-capable subagents (creative-worker) must run in the foreground.",
+			"Use subagent in background only for read-only, nonblocking work (research-plan, reviewer); write-capable subagents (creative-worker) must run in the foreground.",
 			"Never poll or sleep for a subagent; never answer before required subagent runs finish — await each result, then integrate and verify it.",
 			"Two consecutive subagent failures with no output mean an infrastructure outage (shared across all agents): stop delegating, report degraded mode, and run at most one health probe after the cooldown — never retry blindly into an open circuit.",
 			"A failed subagent reviewer run is not a review: it provides no review feedback, so never treat it as one; re-review only after the underlying failure is resolved.",
-			"After two failures of the same delegated subagent task, do not blindly retry: report the blocker and replan (a fresh planner run may help) instead of hammering the same launch.",
+			"After two failures of the same delegated subagent task, do not blindly retry: report the blocker and replan (a fresh research-plan run may help) instead of hammering the same launch.",
 			"After risky subagent changes, delegate an independent review to the reviewer subagent (the subagent-orchestration skill lists the risk classes); verify the integrated result in the parent without repeating the child's exploration.",
-			"Planner and reviewer subagent runs execute in a per-run disposable clone of the run's working directory (detached HEAD at launch, snapshotting staged, unstaged, and non-ignored untracked state); a failed clone preparation fails the run closed — never fall back to the shared working directory, never retry the same launch blindly.",
+			"Research-plan and reviewer subagent runs execute in a per-run disposable clone of the run's working directory (detached HEAD at launch, snapshotting staged, unstaged, and non-ignored untracked state); a failed clone preparation fails the run closed — never fall back to the shared working directory, never retry the same launch blindly.",
 			"Pass the subagent `cwd` parameter (default: the parent's current directory) when the delegated task targets a different working directory — e.g. another worktree or checkout of the same repo. Read-only runs then snapshot that directory instead of the parent's, so the reviewer's clone contains that directory's uncommitted changes; write-capable runs start in it. Never create a local commit just to make uncommitted changes reviewable.",
 			"Delegating a scope transfers evidence ownership to the subagent child: before delegating, collect only routing inventory (ids, titles, states, labels, updatedAt, repo HEAD); after the handoff, verify with a batched freshness delta and narrow checks — do not re-read full evidence the child already summarized (see the subagent-orchestration skill).",
 			"Consult the subagent-orchestration skill for detailed routing and agent selection.",

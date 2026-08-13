@@ -1,5 +1,5 @@
 // Dedicated-root lifecycle and startup stale sweep for disposable read-only run
-// dirs (planner, reviewer clones). One tiny helper file: no daemon, no timers, no
+// dirs (research-plan, reviewer clones). One tiny helper file: no daemon, no timers, no
 // configuration surface, no new dependencies. Normal ends remove the run dir
 // immediately (best-effort, via the extension's existing temp-dir cleanup); a
 // startup sweep (once per session start) reclaims dirs left behind by

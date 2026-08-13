@@ -1,24 +1,24 @@
 ---
 name: subagent-orchestration
-description: Routes work through Wabi's subagent tool — planner for read-only planning of complex/uncertain tasks, reviewer for independent review, creative-worker for builds; foreground for blocking work, background only for read-only work, reviewer after risky changes. Use proactively before complex or uncertain tasks, when work can run independently or in parallel, needs an independent review, or is a creative UI build. Do not use for trivial or tightly coupled edits. Requires the subagent tool.
+description: Routes work through Wabi's subagent tool — research-plan for complex or uncertain tasks (deep research + implementation plan), reviewer for independent review, creative-worker for builds; foreground for blocking work, background only for read-only work, reviewer after risky changes. Use proactively: research-plan before any complex or uncertain task, reviewer after risky changes, creative-worker for creative UI builds. Do not use for trivial or tightly coupled edits. Requires the subagent tool.
 compatibility: Requires Wabi's subagent extension and configured child agents.
 ---
 
 # Subagent Orchestration
 
-The parent agent owns exploration and ordinary implementation. Delegate only when isolation or parallelism pays for the handoff, or when a specialist child (planning, review, creative) does the job better. Keep small tasks and tightly coupled edits in the parent.
+The parent agent owns ordinary implementation. Delegate only when isolation or parallelism pays for the handoff, or when a specialist child (research-plan, review, creative) does the job better. Keep small tasks and tightly coupled edits in the parent.
 
 ## Route work
 
-- The parent implements: keep non-atomic implementation in the parent — further exploration, multiple files, an uncertain path, and test/debug loops are the parent's own job. Do not delegate work that is small, tightly coupled, or already fully understood.
-- Use `planner` before a complex or uncertain task to get an implementation plan (read-only; foreground when the plan gates the next step, background otherwise). The planner never implements — adopt its plan and implement it yourself.
+- The parent implements: keep non-atomic implementation in the parent — multiple files, an uncertain path, and test/debug loops are the parent's own job. Do not delegate work that is small, tightly coupled, or already fully understood.
+- For a complex or uncertain task, delegate Research & Plan to `research-plan` **before you explore or implement**: it owns the deep dive — reads the relevant code, traces flows, verifies assumptions — and returns a concrete implementation plan with evidence. Do not pre-explore the task yourself: the handoff is the exploration. Foreground when the plan gates the next step (it usually does), background otherwise. research-plan never implements — adopt its plan and implement it yourself.
 - Use `creative-worker` for visual, interactive, web, and 3D builds.
 - Use `reviewer` for an independent correctness and complexity pass. When the reviewed work ran in a different working directory than your own (a task-level "Working directory" or another worktree of the repo), pass that directory as the subagent `cwd` parameter so the reviewer's disposable clone snapshots exactly it — uncommitted changes included. Never create a local commit just to make uncommitted changes reviewable.
 
 ## Choose a mode
 
 - Foreground: blocks until the subagent finishes and streams progress; use for work that gates the next decision. Issue sibling foreground subagent calls in one assistant message for independent blocking work.
-- Background: read-only, nonblocking work only (`planner`, `reviewer`). Write-capable subagents are rejected in the background; their final result is steered back before your next turn.
+- Background: read-only, nonblocking work only (`research-plan`, `reviewer`). Write-capable subagents are rejected in the background; their final result is steered back before your next turn.
 - At most four subagents may run, and only one write-capable at a time.
 
 ## Evidence ownership: one reader per piece of evidence
@@ -58,7 +58,7 @@ Delegate an independent review to `reviewer` after any change in one of these ri
 - Inspect the existing diff, refine the task, and retry once with one fresh run.
 - Two consecutive failures with **no output** (empty infrastructure failures: nonzero exit, missing final stop reason, or provider error before any text) mean an infrastructure outage shared across all agents: **stop delegating**, report degraded mode, and run **at most one health probe** after the circuit's cooldown. Never retry blindly into an open circuit; a successful probe closes it, a failed probe reopens it.
 - A failed reviewer run is **not a review**: it contributes no review feedback, so never treat it as one; re-review only after the underlying failure is resolved.
-- After two failures of the same delegated task, **do not blindly retry**: report the blocker and replan — a fresh planner run may help — instead of hammering the same launch.
+- After two failures of the same delegated task, **do not blindly retry**: report the blocker and replan — a fresh research-plan run may help — instead of hammering the same launch.
 
 ## Delegate well
 

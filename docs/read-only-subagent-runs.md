@@ -37,7 +37,7 @@ parent pays the full exploration cost on both sides — delegation loses its val
 The design boundary accepted by the user is deliberately minimal, and both root causes
 are in scope at the same level:
 
-- **Execution ownership:** isolate only the read-only agents (planner, reviewer) into a
+- **Execution ownership:** isolate only the read-only agents (research-plan, reviewer) into a
   disposable local clone per run; leave creative-worker on the shared checkout;
   solve the shared-checkout and concurrent-refs problems. Clone preparation is
   asynchronous, cancelable (stop/reload/tool abort), and bounded by one shared total
@@ -52,7 +52,7 @@ Everything else is deferred (see Deferred items).
 
 ### Execution isolation
 
-- Read-only children (planner, reviewer) work against a per-run disposable local clone of the run's working directory (the optional `cwd` parameter, default the parent's),
+- Read-only children (research-plan, reviewer) work against a per-run disposable local clone of the run's working directory (the optional `cwd` parameter, default the parent's),
   never the parent's checkout. This holds in foreground and background modes — the
   only modes read-only agents run in.
 - The child sees the parent's working tree exactly: staged changes stay staged, unstaged
@@ -116,7 +116,7 @@ temp directory that is deleted when the run finishes.
 
 ### Targeted working directory (`cwd`)
 
-The tool interface is `subagent({ agent, task, background?, cwd? })`: the optional `cwd` names the working directory for the run (relative paths resolve against the parent's cwd). Write-capable children are spawned there; read-only children (planner, reviewer) snapshot it — the clone is taken from the worktree containing it. This exists because a delegated task's working directory is not always the parent's own: the parent may work in a linked worktree or checkout of the repo, and the changes under review live there. Without `cwd`, a reviewer's clone captured only the parent's checkout and missed them — observed in session `019fee62-c658-7399-b5ac-e455a3cd405f` (reviewer-26 blocked with "the injected clone does not represent the requested worktree"), which pushed the parent into a side-effect workaround (a local commit, review-by-SHA, then live install). With `cwd`, the parent states the same working directory it put in the task text, and the reviewer's clone reproduces exactly that directory's uncommitted state — no commit is ever needed just to make changes reviewable.
+The tool interface is `subagent({ agent, task, background?, cwd? })`: the optional `cwd` names the working directory for the run (relative paths resolve against the parent's cwd). Write-capable children are spawned there; read-only children (research-plan, reviewer) snapshot it — the clone is taken from the worktree containing it. This exists because a delegated task's working directory is not always the parent's own: the parent may work in a linked worktree or checkout of the repo, and the changes under review live there. Without `cwd`, a reviewer's clone captured only the parent's checkout and missed them — observed in session `019fee62-c658-7399-b5ac-e455a3cd405f` (reviewer-26 blocked with "the injected clone does not represent the requested worktree"), which pushed the parent into a side-effect workaround (a local commit, review-by-SHA, then live install). With `cwd`, the parent states the same working directory it put in the task text, and the reviewer's clone reproduces exactly that directory's uncommitted state — no commit is ever needed just to make changes reviewable.
 - Read-only runs live in a **dedicated root**: `${tmpdir()}/wabi-readonly-runs/`,
   one directory per run named `wabi-ro-<runId>` (created mode 0700). The run's
   tempDir **is** this whole run dir (the prompt temp file and the clone live
