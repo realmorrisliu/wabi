@@ -1,6 +1,6 @@
 ---
 name: subagent-orchestration
-description: Routes work through Wabi's subagent tool — research-plan for complex or uncertain tasks (deep research + implementation plan), reviewer for independent review, creative-worker for builds; foreground for blocking work, background only for read-only work, reviewer after risky changes. Use proactively: research-plan before any complex or uncertain task, reviewer after risky changes, creative-worker for creative UI builds. Do not use for trivial or tightly coupled edits. Requires the subagent tool.
+description: "Routes work through Wabi's subagent tool — research-plan for complex or uncertain tasks (deep research + implementation plan), reviewer for independent review, creative-worker for builds; foreground for blocking work, background only for read-only work, reviewer after risky changes. Use proactively: research-plan before any complex or uncertain task, reviewer after risky changes, creative-worker for creative UI builds. Do not use for trivial or tightly coupled edits. Requires the subagent tool."
 compatibility: Requires Wabi's subagent extension and configured child agents.
 ---
 
