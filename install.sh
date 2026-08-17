@@ -1,22 +1,31 @@
 #!/usr/bin/env bash
-# wabi — install (symlink) into the global pi agent dir.
+# wabi — pi 配置发行版: subagent runtime (pi-subagents), custom agents, prompt
+# templates, settings seed, herdr skill + pi integration. Safe to re-run.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-mkdir -p ~/.pi/agent/extensions ~/.pi/agent/agents ~/.pi/agent/prompts ~/.pi/agent/skills
+AGENT_DIR="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+mkdir -p "$AGENT_DIR/agents" "$AGENT_DIR/prompts" "$AGENT_DIR/skills"
 
-ln -sfn "$PWD/extensions/subagents" ~/.pi/agent/extensions/wabi-subagents
-ln -sfn "$PWD/skills/subagent-orchestration" ~/.pi/agent/skills/subagent-orchestration
-for f in agents/*.md; do
-	ln -sf "$PWD/$f" ~/.pi/agent/agents/"$(basename "$f")"
-done
-for f in prompts/*.md; do
-	ln -sf "$PWD/$f" ~/.pi/agent/prompts/"$(basename "$f")"
-done
+# 1. pi packages: the subagent runtime + ponytail skills
+pi install npm:pi-subagents
+pi install git:github.com/DietrichGebert/ponytail
 
-# stale prompts and symlinks from earlier versions
-rm -f ~/.pi/agent/prompts/implement-and-review.md ~/.pi/agent/prompts/implement.md
-rm -f ~/.pi/agent/prompts/scout-and-plan.md ~/.pi/agent/prompts/work.md ~/.pi/agent/prompts/plan.md
-rm -f ~/.pi/agent/agents/worker.md ~/.pi/agent/agents/scout.md ~/.pi/agent/agents/planner.md
+# 2. custom agents (pi-subagents discovers $AGENT_DIR/agents/**/*.md; a user
+#    agent shadows a builtin of the same name)
+for f in agents/*.md; do ln -sf "$PWD/$f" "$AGENT_DIR/agents/$(basename "$f")"; done
 
-echo "wabi installed. Run /reload in pi to load the extension."
+# 3. prompt templates
+for f in prompts/*.md; do ln -sf "$PWD/$f" "$AGENT_DIR/prompts/$(basename "$f")"; done
+
+# 4. settings: seed once, never clobber an existing config
+[ -f "$AGENT_DIR/settings.json" ] || cp settings.json "$AGENT_DIR/settings.json"
+
+# 5. herdr (optional): release-matched official skill + pi integration
+if command -v herdr >/dev/null 2>&1; then
+	mkdir -p "$AGENT_DIR/skills/herdr"
+	herdr --skill >"$AGENT_DIR/skills/herdr/SKILL.md"
+	herdr integration install pi >/dev/null 2>&1 || true
+fi
+
+echo "wabi installed into $AGENT_DIR — restart pi or /reload."

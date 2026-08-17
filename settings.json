@@ -1,0 +1,10 @@
+{
+  "theme": "dark",
+  "defaultProvider": "kimi-coding",
+  "defaultModel": "k3",
+  "defaultThinkingLevel": "max",
+  "packages": [
+    "npm:pi-subagents",
+    "git:github.com/DietrichGebert/ponytail"
+  ]
+}
