@@ -18,8 +18,9 @@ On a new machine: install pi, clone this repo, run `./install.sh`. Done.
 | agent | model | fallback | role |
 |---|---|---|---|
 | `research-plan` | openai-codex/gpt-5.6-sol (max) | kimi-coding/kimi-k3 | read-only research & plan for complex or uncertain tasks |
-| `reviewer` | openai-codex/gpt-5.6-sol (medium) | kimi-coding/kimi-k3 | correctness + ponytail-review complexity pass |
 | `creative-worker` | kimi-coding/k3 (high) | openai-codex/gpt-5.6-sol | web pages, 3D, visual builds |
+
+Review uses pi-subagents' builtin `reviewer` (inherits the session default model).
 
 Agents share the parent's working directory (pi-subagents has no clone isolation): read-only agents are read-only by policy and prompt — never write files, never mutate git state. For isolated writing children use pi-subagents' `worktree: true`.
 

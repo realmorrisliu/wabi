@@ -28,12 +28,11 @@ function parseFrontmatter(content: string): Record<string, string> {
 // --- agents ---
 const expected: Record<string, { model: string; fallback: string; thinking: string }> = {
 	"research-plan": { model: "openai-codex/gpt-5.6-sol", fallback: "kimi-coding/kimi-k3", thinking: "max" },
-	reviewer: { model: "openai-codex/gpt-5.6-sol", fallback: "kimi-coding/kimi-k3", thinking: "medium" },
 	"creative-worker": { model: "kimi-coding/k3", fallback: "openai-codex/gpt-5.6-sol", thinking: "high" },
 };
 
 const agentFiles = readdirSync(join(repoRoot, "agents")).filter((f) => f.endsWith(".md"));
-check("agents: exactly the 3 expected agents", agentFiles.sort().join(",") === "creative-worker.md,research-plan.md,reviewer.md");
+check("agents: exactly the 2 expected agents", agentFiles.sort().join(",") === "creative-worker.md,research-plan.md");
 
 for (const [name, want] of Object.entries(expected)) {
 	const fm = parseFrontmatter(readFileSync(join(repoRoot, "agents", `${name}.md`), "utf8"));
