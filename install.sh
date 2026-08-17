@@ -18,10 +18,7 @@ for f in agents/*.md; do ln -sf "$PWD/$f" "$AGENT_DIR/agents/$(basename "$f")"; 
 # 3. prompt templates
 for f in prompts/*.md; do ln -sf "$PWD/$f" "$AGENT_DIR/prompts/$(basename "$f")"; done
 
-# 4. settings: seed once, never clobber an existing config
-[ -f "$AGENT_DIR/settings.json" ] || cp settings.json "$AGENT_DIR/settings.json"
-
-# 5. herdr (optional): release-matched official skill + pi integration
+# 4. herdr (optional): release-matched official skill + pi integration
 if command -v herdr >/dev/null 2>&1; then
 	mkdir -p "$AGENT_DIR/skills/herdr"
 	herdr --skill >"$AGENT_DIR/skills/herdr/SKILL.md"

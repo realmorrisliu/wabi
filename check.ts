@@ -47,10 +47,6 @@ for (const file of readdirSync(join(repoRoot, "prompts")).filter((f) => f.endsWi
 	check(`prompt ${file}: has description`, !!fm.description);
 }
 
-// --- settings template ---
-const settings = JSON.parse(readFileSync(join(repoRoot, "settings.json"), "utf8"));
-check("settings: default model and packages", settings.defaultModel === "k3" && settings.packages?.includes("npm:pi-subagents") && settings.packages?.includes("git:github.com/DietrichGebert/ponytail"));
-
 if (failures > 0) {
 	console.error(`\n${failures} check(s) FAILED`);
 	process.exit(1);

@@ -10,7 +10,6 @@ On a new machine: install pi, clone this repo, run `./install.sh`. Done.
 - [ponytail](https://github.com/DietrichGebert/ponytail) — anti-over-engineering skills
 - Custom agents in `~/.pi/agent/agents/` (pi-subagents user agents; a user agent shadows a builtin of the same name)
 - Prompt templates in `~/.pi/agent/prompts/`
-- `settings.json` seed (only when none exists — never clobbers an existing config)
 - herdr official skill (`herdr --skill`, release-matched) and `herdr integration install pi`, when herdr is on PATH
 
 ## Agents
