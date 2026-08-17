@@ -11,6 +11,8 @@ On a new machine: install pi, clone this repo, run `./install.sh`. Done.
 - Custom agents in `~/.pi/agent/agents/` (pi-subagents user agents; a user agent shadows a builtin of the same name)
 - Prompt templates in `~/.pi/agent/prompts/`
 - herdr official skill (`herdr --skill`, release-matched) and `herdr integration install pi`, when herdr is on PATH
+- pi themes in `~/.pi/agent/themes/` (Kanagawa pair) + a settings seed that sets only `theme` to `kanagawa-lotus/kanagawa` (pi then follows terminal light/dark; the rest of settings.json is untouched)
+- herdr (`herdr/config.toml`) and Ghostty (`ghostty/config`) theme configs — same Kanagawa pair, following macOS appearance; installed when herdr/Ghostty is present, existing real files are backed up to `.bak`
 
 ## Agents
 

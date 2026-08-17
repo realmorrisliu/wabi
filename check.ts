@@ -1,6 +1,6 @@
 // check.ts — self-check for wabi's distribution files. Run: bun check.ts
 
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 const repoRoot = new URL(".", import.meta.url).pathname;
@@ -46,6 +46,14 @@ for (const file of readdirSync(join(repoRoot, "prompts")).filter((f) => f.endsWi
 	const fm = parseFrontmatter(readFileSync(join(repoRoot, "prompts", file), "utf8"));
 	check(`prompt ${file}: has description`, !!fm.description);
 }
+
+// --- themes & app configs ---
+for (const file of readdirSync(join(repoRoot, "themes")).filter((f) => f.endsWith(".json"))) {
+	const theme = JSON.parse(readFileSync(join(repoRoot, "themes", file), "utf8"));
+	check(`theme ${file}: name matches filename`, theme.name === file.replace(/\.json$/, ""));
+}
+check("ghostty config present", existsSync(join(repoRoot, "ghostty/config")));
+check("herdr config present", existsSync(join(repoRoot, "herdr/config.toml")));
 
 if (failures > 0) {
 	console.error(`\n${failures} check(s) FAILED`);
