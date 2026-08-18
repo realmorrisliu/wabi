@@ -29,3 +29,10 @@ kitty_graphics = true
 
 [update]
 channel = "stable"
+
+# Direct (prefix-less) bindings for daily actions; everything else stays on prefix.
+[keys]
+new_workspace = "ctrl+alt+n"
+workspace_picker = "ctrl+alt+w"
+toggle_sidebar = "ctrl+alt+b"
+zoom = "ctrl+alt+z"
