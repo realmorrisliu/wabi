@@ -28,11 +28,10 @@ function parseFrontmatter(content: string): Record<string, string> {
 // --- agents ---
 const expected: Record<string, { model: string; fallback: string; thinking: string }> = {
 	"research-plan": { model: "openai-codex/gpt-5.6-sol", fallback: "kimi-coding/kimi-k3", thinking: "max" },
-	"creative-worker": { model: "kimi-coding/k3", fallback: "openai-codex/gpt-5.6-sol", thinking: "high" },
 };
 
 const agentFiles = readdirSync(join(repoRoot, "agents")).filter((f) => f.endsWith(".md"));
-check("agents: exactly the 2 expected agents", agentFiles.sort().join(",") === "creative-worker.md,research-plan.md");
+check("agents: exactly the 1 expected agent", agentFiles.join(",") === "research-plan.md");
 
 for (const [name, want] of Object.entries(expected)) {
 	const fm = parseFrontmatter(readFileSync(join(repoRoot, "agents", `${name}.md`), "utf8"));
@@ -66,6 +65,12 @@ check("herdr config present", existsSync(join(repoRoot, "herdr/config.toml")));
 for (const file of readdirSync(join(repoRoot, "extensions")).filter((f) => f.endsWith(".ts"))) {
 	const src = readFileSync(join(repoRoot, "extensions", file), "utf8");
 	check(`extension ${file}: registers a tool and has default export`, src.includes("registerTool") && src.includes("export default"));
+}
+
+// --- skills ---
+for (const dir of readdirSync(join(repoRoot, "skills"))) {
+	const fm = parseFrontmatter(readFileSync(join(repoRoot, "skills", dir, "SKILL.md"), "utf8"));
+	check(`skill ${dir}: name/description present`, fm.name === dir && !!fm.description);
 }
 
 if (failures > 0) {

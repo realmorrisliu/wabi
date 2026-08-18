@@ -26,6 +26,13 @@ for f in prompts/*.md; do ln -sf "$PWD/$f" "$AGENT_DIR/prompts/$(basename "$f")"
 mkdir -p "$AGENT_DIR/extensions"
 for f in extensions/*.ts; do ln -sf "$PWD/$f" "$AGENT_DIR/extensions/$(basename "$f")"; done
 
+# 3c. custom skills (creative-worker: herdr + kimi CLI in an isolated worktree)
+for d in skills/*/; do
+	name=$(basename "$d")
+	mkdir -p "$AGENT_DIR/skills/$name"
+	ln -sf "$PWD${d#.}/SKILL.md" "$AGENT_DIR/skills/$name/SKILL.md"
+done
+
 # 4. herdr (optional): release-matched official skill + pi integration
 if command -v herdr >/dev/null 2>&1; then
 	mkdir -p "$AGENT_DIR/skills/herdr"
