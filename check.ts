@@ -53,6 +53,13 @@ for (const file of readdirSync(join(repoRoot, "themes")).filter((f) => f.endsWit
 	check(`theme ${file}: name matches filename`, theme.name === file.replace(/\.json$/, ""));
 }
 check("ghostty config present", existsSync(join(repoRoot, "ghostty/config")));
+// macOS App Support ghostty config (if any) must not override wabi's theme
+for (const name of ["config", "config.ghostty"]) {
+	const f = join(process.env.HOME ?? "", "Library/Application Support/com.mitchellh.ghostty", name);
+	if (existsSync(f)) {
+		check(`ghostty ${name}: no theme/window-theme override`, !/^(theme|window-theme)\s*=/m.test(readFileSync(f, "utf8")));
+	}
+}
 check("herdr config present", existsSync(join(repoRoot, "herdr/config.toml")));
 
 // --- extensions ---

@@ -57,6 +57,14 @@ if [ -d /Applications/Ghostty.app ] || [ -d "$HOME/.config/ghostty" ]; then
 	ln -sf "$PWD/ghostty/config" "$HOME/.config/ghostty/config"
 	# font referenced by the config (skip silently without brew)
 	command -v brew >/dev/null 2>&1 && brew install --cask font-maple-mono-nf-cn || true
+	# macOS: App Support config takes precedence over XDG — strip theme keys
+	# there (backup first) so wabi's theme wins; personal settings untouched
+	for f in "$HOME/Library/Application Support/com.mitchellh.ghostty/config" "$HOME/Library/Application Support/com.mitchellh.ghostty/config.ghostty"; do
+		if [ -f "$f" ] && grep -qE '^(theme|window-theme)\s*=' "$f"; then
+			cp "$f" "$f.bak"
+			sed -i '' -E '/^(theme|window-theme)\s*=/d' "$f"
+		fi
+	done
 fi
 
 echo "wabi installed into $AGENT_DIR — restart pi or /reload."

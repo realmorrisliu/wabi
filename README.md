@@ -14,7 +14,7 @@ On a new machine: install pi, clone this repo, run `./install.sh`. Done.
 - Prompt templates in `~/.pi/agent/prompts/`
 - herdr official skill (`herdr --skill`, release-matched) and `herdr integration install pi`, when herdr is on PATH
 - pi themes in `~/.pi/agent/themes/` (Kanagawa pair) + a settings seed that sets only `theme` to `kanagawa-lotus/kanagawa` (pi then follows terminal light/dark; the rest of settings.json is untouched)
-- herdr (`herdr/config.toml`) and Ghostty (`ghostty/config`) theme configs — same Kanagawa pair, following macOS appearance; Ghostty also gets Maple Mono NF CN (font cask via brew) for powerline/icon/CJK coverage; installed when herdr/Ghostty is present, existing real files are backed up to `.bak`
+- herdr (`herdr/config.toml`) and Ghostty (`ghostty/config`) theme configs — same Kanagawa pair, following macOS appearance; Ghostty also gets Maple Mono NF CN (font cask via brew) for powerline/icon/CJK coverage; installed when herdr/Ghostty is present, existing real files are backed up to `.bak`. On macOS, Ghostty's App Support config takes precedence over `~/.config`, so install strips `theme`/`window-theme` keys there (backed up) to keep wabi's theme winning — all other keys untouched
 
 ## Agents
 
