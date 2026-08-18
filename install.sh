@@ -55,6 +55,8 @@ if [ -d /Applications/Ghostty.app ] || [ -d "$HOME/.config/ghostty" ]; then
 	mkdir -p "$HOME/.config/ghostty"
 	backup_if_real "$HOME/.config/ghostty/config"
 	ln -sf "$PWD/ghostty/config" "$HOME/.config/ghostty/config"
+	# font referenced by the config (skip silently without brew)
+	command -v brew >/dev/null 2>&1 && brew install --cask font-maple-mono-nf-cn || true
 fi
 
 echo "wabi installed into $AGENT_DIR — restart pi or /reload."
