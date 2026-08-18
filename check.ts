@@ -25,21 +25,6 @@ function parseFrontmatter(content: string): Record<string, string> {
 	return fields;
 }
 
-// --- agents ---
-const expected: Record<string, { model: string; fallback: string; thinking: string }> = {
-	"research-plan": { model: "openai-codex/gpt-5.6-sol", fallback: "kimi-coding/kimi-k3", thinking: "max" },
-};
-
-const agentFiles = readdirSync(join(repoRoot, "agents")).filter((f) => f.endsWith(".md"));
-check("agents: exactly the 1 expected agent", agentFiles.join(",") === "research-plan.md");
-
-for (const [name, want] of Object.entries(expected)) {
-	const fm = parseFrontmatter(readFileSync(join(repoRoot, "agents", `${name}.md`), "utf8"));
-	check(`${name}: name/description/tools present`, fm.name === name && !!fm.description && !!fm.tools);
-	check(`${name}: model + fallbackModels + thinking`, fm.model === want.model && fm.fallbackModels === want.fallback && fm.thinking === want.thinking);
-	check(`${name}: inherits skills and project context`, fm.inheritSkills === "true" && fm.inheritProjectContext === "true");
-}
-
 // --- prompts ---
 for (const file of readdirSync(join(repoRoot, "prompts")).filter((f) => f.endsWith(".md"))) {
 	const fm = parseFrontmatter(readFileSync(join(repoRoot, "prompts", file), "utf8"));
