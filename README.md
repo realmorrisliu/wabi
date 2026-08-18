@@ -8,6 +8,8 @@ On a new machine: install pi, clone this repo, run `./install.sh`. Done.
 
 - [pi-subagents](https://github.com/nicobailon/pi-subagents) — the subagent runtime: `subagent` tool, builtin agents, fleet view, worktree isolation, native `fallbackModels`
 - [ponytail](https://github.com/DietrichGebert/ponytail) — anti-over-engineering skills
+- [@gotgenes/pi-github-tools](https://www.npmjs.com/package/@gotgenes/pi-github-tools) — deterministic GitHub CI tools (`ci_find`/`ci_watch`/`ci_list` with backoff + transient retry) replacing ad-hoc `gh` polling
+- Custom extension `extensions/pr-review-threads.ts` — `pr_review_threads` tool: PR review comments with resolved/outdated state via live GraphQL (`gh pr view --comments` misses review threads)
 - Custom agents in `~/.pi/agent/agents/` (pi-subagents user agents; a user agent shadows a builtin of the same name)
 - Prompt templates in `~/.pi/agent/prompts/`
 - herdr official skill (`herdr --skill`, release-matched) and `herdr integration install pi`, when herdr is on PATH

@@ -55,6 +55,12 @@ for (const file of readdirSync(join(repoRoot, "themes")).filter((f) => f.endsWit
 check("ghostty config present", existsSync(join(repoRoot, "ghostty/config")));
 check("herdr config present", existsSync(join(repoRoot, "herdr/config.toml")));
 
+// --- extensions ---
+for (const file of readdirSync(join(repoRoot, "extensions")).filter((f) => f.endsWith(".ts"))) {
+	const src = readFileSync(join(repoRoot, "extensions", file), "utf8");
+	check(`extension ${file}: registers a tool and has default export`, src.includes("registerTool") && src.includes("export default"));
+}
+
 if (failures > 0) {
 	console.error(`\n${failures} check(s) FAILED`);
 	process.exit(1);

@@ -10,9 +10,10 @@ mkdir -p "$AGENT_DIR/agents" "$AGENT_DIR/prompts" "$AGENT_DIR/skills"
 
 backup_if_real() { if [ -e "$1" ] && [ ! -L "$1" ]; then mv "$1" "$1.bak"; fi; }
 
-# 1. pi packages: the subagent runtime + ponytail skills
+# 1. pi packages: the subagent runtime + ponytail skills + deterministic GitHub CI tools
 pi install npm:pi-subagents
 pi install git:github.com/DietrichGebert/ponytail
+pi install npm:@gotgenes/pi-github-tools
 
 # 2. custom agents (pi-subagents discovers $AGENT_DIR/agents/**/*.md; a user
 #    agent shadows a builtin of the same name)
@@ -20,6 +21,10 @@ for f in agents/*.md; do ln -sf "$PWD/$f" "$AGENT_DIR/agents/$(basename "$f")"; 
 
 # 3. prompt templates
 for f in prompts/*.md; do ln -sf "$PWD/$f" "$AGENT_DIR/prompts/$(basename "$f")"; done
+
+# 3b. custom extensions (pr_review_threads tool: reliable PR feedback state via GraphQL)
+mkdir -p "$AGENT_DIR/extensions"
+for f in extensions/*.ts; do ln -sf "$PWD/$f" "$AGENT_DIR/extensions/$(basename "$f")"; done
 
 # 4. herdr (optional): release-matched official skill + pi integration
 if command -v herdr >/dev/null 2>&1; then
