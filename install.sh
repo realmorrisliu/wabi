@@ -18,7 +18,7 @@ pi install npm:@gotgenes/pi-github-tools
 # 2. prompt templates
 for f in prompts/*.md; do ln -sf "$PWD/$f" "$AGENT_DIR/prompts/$(basename "$f")"; done
 
-# 3. custom extensions (pr_review_threads tool: reliable PR feedback state via GraphQL)
+# 3. custom extensions (PR review threads + cross-app theme selection)
 mkdir -p "$AGENT_DIR/extensions"
 for f in extensions/*.ts; do ln -sf "$PWD/$f" "$AGENT_DIR/extensions/$(basename "$f")"; done
 
@@ -34,26 +34,30 @@ if command -v herdr >/dev/null 2>&1; then
 	mkdir -p "$AGENT_DIR/skills/herdr"
 	herdr --skill >"$AGENT_DIR/skills/herdr/SKILL.md"
 	herdr integration install pi >/dev/null 2>&1 || true
-	# herdr theme config (kanagawa pair, follows host terminal light/dark)
+	# herdr theme config (default Catppuccin pair, follows host terminal light/dark)
 	mkdir -p "$HOME/.config/herdr"
 	backup_if_real "$HOME/.config/herdr/config.toml"
 	ln -sf "$PWD/herdr/config.toml" "$HOME/.config/herdr/config.toml"
 fi
 
-# 6. pi themes (kanagawa pair)
+# 6. pi themes and the shared pair registry
 mkdir -p "$AGENT_DIR/themes"
 for f in themes/*.json; do ln -sf "$PWD/$f" "$AGENT_DIR/themes/$(basename "$f")"; done
+ln -sf "$PWD/theme-pairs.json" "$AGENT_DIR/theme-pairs.json"
 
-# 7. settings seed: theme pair only, everything else preserved
+# 7. settings seed: default pair only when no theme is configured
 node -e '
 const fs = require("fs");
+const path = require("path");
 const f = process.argv[1];
+const registry = JSON.parse(fs.readFileSync(path.join(process.cwd(), "theme-pairs.json"), "utf8"));
+const pair = registry.pairs[registry.default];
 const s = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {};
-s.theme = "kanagawa-lotus/kanagawa";
+if (typeof s.theme !== "string" && pair) s.theme = `${pair.light.pi}/${pair.dark.pi}`;
 fs.writeFileSync(f, JSON.stringify(s, null, "\t") + "\n");
 ' "$AGENT_DIR/settings.json"
 
-# 8. ghostty (optional): kanagawa theme, follows macOS appearance
+# 8. ghostty (optional): selected pair, follows macOS appearance
 if [ -d /Applications/Ghostty.app ] || [ -d "$HOME/.config/ghostty" ]; then
 	mkdir -p "$HOME/.config/ghostty"
 	backup_if_real "$HOME/.config/ghostty/config"

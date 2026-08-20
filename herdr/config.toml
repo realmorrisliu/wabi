@@ -11,10 +11,10 @@ delivery = "terminal"
 enabled = false
 
 [theme]
-name = "kanagawa"
+name = "catppuccin"
 auto_switch = true
-dark_name = "kanagawa"
-light_name = "kanagawa-lotus"
+dark_name = "catppuccin"
+light_name = "catppuccin-latte"
 
 # Enable Kitty graphics rendering in panes (pi image previews on Ghostty).
 [experimental]

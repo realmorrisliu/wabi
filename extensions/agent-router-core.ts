@@ -274,6 +274,8 @@ function quotaState(quota: QuotaSnapshot | undefined, minRemaining: number): "su
 	return "sufficient";
 }
 
+export default function agentRouterCore(): void {}
+
 export function routeAgents(
 	inventory: AgentRecord[],
 	task: string,

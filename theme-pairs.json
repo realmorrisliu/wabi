@@ -1,0 +1,83 @@
+{
+	"default": "catppuccin",
+	"pairs": {
+		"kanagawa": {
+			"label": "Kanagawa",
+			"light": {
+				"pi": "kanagawa-lotus",
+				"herdr": "kanagawa-lotus",
+				"ghostty": "Kanagawa Lotus HC"
+			},
+			"dark": {
+				"pi": "kanagawa",
+				"herdr": "kanagawa",
+				"ghostty": "Kanagawa Wave"
+			}
+		},
+		"catppuccin": {
+			"label": "Catppuccin",
+			"light": {
+				"pi": "catppuccin-latte",
+				"herdr": "catppuccin-latte",
+				"ghostty": "Catppuccin Latte"
+			},
+			"dark": {
+				"pi": "catppuccin-mocha",
+				"herdr": "catppuccin",
+				"ghostty": "Catppuccin Mocha"
+			}
+		},
+		"tokyo-night": {
+			"label": "Tokyo Night",
+			"light": {
+				"pi": "tokyonight-day",
+				"herdr": "tokyo-night-day",
+				"ghostty": "TokyoNight Day"
+			},
+			"dark": {
+				"pi": "tokyonight",
+				"herdr": "tokyo-night",
+				"ghostty": "TokyoNight"
+			}
+		},
+		"rose-pine": {
+			"label": "Rosé Pine",
+			"light": {
+				"pi": "rose-pine-dawn",
+				"herdr": "rose-pine-dawn",
+				"ghostty": "Rose Pine Dawn"
+			},
+			"dark": {
+				"pi": "rose-pine",
+				"herdr": "rose-pine",
+				"ghostty": "Rose Pine"
+			}
+		},
+		"gruvbox": {
+			"label": "Gruvbox",
+			"light": {
+				"pi": "gruvbox-light-medium",
+				"herdr": "gruvbox-light",
+				"ghostty": "Gruvbox Light"
+			},
+			"dark": {
+				"pi": "gruvbox-dark-medium",
+				"herdr": "gruvbox",
+				"ghostty": "Gruvbox Dark"
+			}
+		},
+		"solarized": {
+			"label": "Solarized",
+			"light": {
+				"pi": "solarized-light",
+				"herdr": "solarized-light",
+				"ghostty": "iTerm2 Solarized Light"
+			},
+			"dark": {
+				"pi": "solarized-dark",
+				"herdr": "solarized",
+				"ghostty": "iTerm2 Solarized Dark"
+			}
+		}
+	}
+}

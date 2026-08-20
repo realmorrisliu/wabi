@@ -32,11 +32,32 @@ for (const file of readdirSync(join(repoRoot, "prompts")).filter((f) => f.endsWi
 }
 
 // --- themes & app configs ---
+const bundledPiThemes = new Set<string>();
 for (const file of readdirSync(join(repoRoot, "themes")).filter((f) => f.endsWith(".json"))) {
 	const theme = JSON.parse(readFileSync(join(repoRoot, "themes", file), "utf8"));
 	check(`theme ${file}: name matches filename`, theme.name === file.replace(/\.json$/, ""));
+	if (typeof theme.name === "string") bundledPiThemes.add(theme.name);
 }
 check("ghostty config present", existsSync(join(repoRoot, "ghostty/config")));
+const themePairsPath = join(repoRoot, "theme-pairs.json");
+if (existsSync(themePairsPath)) {
+	const registry = JSON.parse(readFileSync(themePairsPath, "utf8")) as {
+		default?: string;
+		pairs?: Record<string, { light?: Record<string, unknown>; dark?: Record<string, unknown> }>;
+	};
+	check("theme pair registry has a default", typeof registry.default === "string" && !!registry.pairs?.[registry.default]);
+	for (const [id, pair] of Object.entries(registry.pairs ?? {})) {
+		for (const mode of ["light", "dark"] as const) {
+			for (const app of ["pi", "herdr", "ghostty"] as const) {
+				const target = pair[mode]?.[app];
+				check(`theme pair ${id}.${mode}.${app}`, typeof target === "string" && !!target);
+				if (app === "pi" && typeof target === "string") {
+					check(`theme pair ${id}.${mode}.pi: bundled theme`, bundledPiThemes.has(target));
+				}
+			}
+		}
+	}
+} else check("theme pair registry present", false);
 // macOS App Support ghostty config (if any) must not override wabi's theme
 for (const name of ["config", "config.ghostty"]) {
 	const f = join(process.env.HOME ?? "", "Library/Application Support/com.mitchellh.ghostty", name);
@@ -49,7 +70,7 @@ check("herdr config present", existsSync(join(repoRoot, "herdr/config.toml")));
 // --- extensions ---
 for (const file of readdirSync(join(repoRoot, "extensions")).filter((f) => f.endsWith(".ts") && !f.endsWith("-core.ts"))) {
 	const src = readFileSync(join(repoRoot, "extensions", file), "utf8");
-	check(`extension ${file}: registers a tool and has default export`, src.includes("registerTool") && src.includes("export default"));
+	check(`extension ${file}: registers a tool/command and has default export`, (src.includes("registerTool") || src.includes("registerCommand")) && src.includes("export default"));
 }
 
 // --- skills ---

@@ -1,3 +1,4 @@
-theme = dark:Kanagawa Wave,light:Kanagawa Lotus HC
+theme = light:Catppuccin Latte,dark:Catppuccin Mocha
+window-theme = system
 font-family = "Maple Mono NF CN"
 font-size = 14

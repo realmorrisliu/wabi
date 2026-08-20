@@ -17,8 +17,23 @@ On a new machine: install pi, clone this repo, run `./install.sh`. Done.
   - `creative-worker` — creative/visual builds (web pages, 3D, prototypes) via Kimi Code CLI in an isolated herdr worktree; results land in RESULT.md
 - Prompt templates in `~/.pi/agent/prompts/`
 - herdr official skill (`herdr --skill`, release-matched) and `herdr integration install pi`, when herdr is on PATH
-- pi themes in `~/.pi/agent/themes/` (Kanagawa pair) + a settings seed that sets only `theme` to `kanagawa-lotus/kanagawa` (pi then follows terminal light/dark; the rest of settings.json is untouched)
-- herdr (`herdr/config.toml`) and Ghostty (`ghostty/config`) theme configs — same Kanagawa pair, following macOS appearance; Ghostty also gets Maple Mono NF CN (font cask via brew) for powerline/icon/CJK coverage; installed when herdr/Ghostty is present, existing real files are backed up to `.bak`. On macOS, Ghostty's App Support config takes precedence over `~/.config`, so install strips `theme`/`window-theme` keys there (backed up) to keep wabi's theme winning — all other keys untouched
+- shared `theme-pairs.json` registry + `/theme` command: choose one light/dark pair and update Pi, Herdr, and Ghostty together; each app then follows system appearance natively
+- bundled Pi themes in `~/.pi/agent/themes/` for all six pairs; installation seeds the default pair only when no Pi theme is configured, preserving the rest of `settings.json`
+- herdr (`herdr/config.toml`) and Ghostty (`ghostty/config`) theme configs — default to the Catppuccin pair and follow macOS appearance; Ghostty also gets Maple Mono NF CN (font cask via brew) for powerline/icon/CJK coverage; installed when herdr/Ghostty is present, existing real files are backed up to `.bak`. On macOS, Ghostty's App Support config takes precedence over `~/.config`, so install strips `theme`/`window-theme` keys there (backed up) to keep wabi's theme winning — all other keys untouched
+
+## Theme pairs
+
+Bundled pairs: **Kanagawa**, **Catppuccin**, **Tokyo Night**, **Rosé Pine**, **Gruvbox**, and **Solarized**. Pi theme attributions are in [`themes/THIRD-PARTY.md`](themes/THIRD-PARTY.md).
+
+```text
+/theme              # choose interactively
+/theme kanagawa     # select directly
+/theme catppuccin
+/theme list
+/theme status
+```
+
+The selector writes the symlink targets managed by this repository, validates Herdr/Ghostty configs, reloads Herdr, requests Ghostty's macOS config reload, and reloads Pi so its native light/dark listener remains active.
 
 ## Delegation
 
@@ -71,6 +86,6 @@ The router does not start agents or dispatch code yet; it returns a recommendati
 ## Verify
 
 ```bash
-bun test tests/agent-router.test.ts
+bun test tests/*.test.ts
 bun check.ts
 ```
