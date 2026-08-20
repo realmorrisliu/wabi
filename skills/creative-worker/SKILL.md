@@ -22,7 +22,7 @@ Requires `HERDR_ENV=1`. If it is not set, stop and report that Herdr is unavaila
 2. **Start Kimi.** Name the workspace `creative-<slug>` and run:
 
    ```bash
-   herdr agent start creative-<slug> --kind kimi --pane <pane-id>
+   herdr agent start creative-<slug> --kind kimi --pane <pane-id> -- --auto
    ```
 
    Done when the named Kimi agent is running in the isolated worktree.

@@ -5,7 +5,7 @@ description: "Plan complex or uncertain implementation work before coding: use C
 
 # Plan first
 
-Use this skill when the task has architectural uncertainty, broad repository impact, or an unclear implementation path. Codex researches; the parent Pi agent implements. Never use this skill to hand off routine coding.
+Use this skill when the task has architectural uncertainty, broad repository impact, or an unclear implementation path. Codex researches; the parent Pi agent implements. Codex runs in auto-approval mode inside the worktree sandbox by default. Never use this skill to hand off routine coding or bypass the sandbox.
 
 Requires `HERDR_ENV=1`. If it is not set, stop and report that Herdr is unavailable. Read the `herdr` skill for command details.
 
@@ -22,7 +22,7 @@ Requires `HERDR_ENV=1`. If it is not set, stop and report that Herdr is unavaila
 2. **Start Codex.** In the root pane, run:
 
    ```bash
-   herdr agent start plan-<slug> --kind codex --pane <pane-id> -- --sandbox workspace-write --ask-for-approval never
+   herdr agent start plan-<slug> --kind codex --pane <pane-id> -- --sandbox workspace-write --approve-for-me
    ```
 
    Done when the named Codex agent is running in the isolated worktree.

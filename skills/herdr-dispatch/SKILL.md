@@ -1,7 +1,7 @@
 ---
 name: herdr-dispatch
 description: Manually dispatch a new task to a coding agent through Herdr in a fresh isolated worktree.
-argument-hint: "agent, task, mode, permissions, deliverable"
+argument-hint: "agent, task, mode, execution, permissions, deliverable"
 disable-model-invocation: true
 ---
 
@@ -19,6 +19,7 @@ Accept a structured block or ordinary prose. Normalize it to this contract befor
 agent: auto | <Herdr agent kind>
 task: <one concrete task>
 mode: plan | build | review | research
+execution: auto | yolo | interactive
 repository: <optional repository path; defaults to the current repo>
 branch: <optional branch slug>
 permissions: read-only | artifact-only | source-edit
@@ -31,12 +32,33 @@ Defaults:
 
 - `agent: auto` when no agent is named; route with `agent_router`.
 - A fresh worktree is always created.
+- `execution: auto`.
 - `wait: true`.
 - `keep-workspace: true`.
 - No commit, push, merge, release, or deletion unless explicitly requested.
 - `permissions` follows the task only when unambiguous: planning/research/review is `read-only` or `artifact-only`; implementation/build/fix is `source-edit` inside the isolated worktree. Ask instead of guessing when the boundary is unclear.
 
 The task must name an outcome, not just an activity. If it is missing a target, acceptance condition, or deliverable, ask one concise clarification before creating a worktree.
+
+## Execution mode
+
+`mode` describes the task; `execution` describes the agent's permission behavior. The default is `auto`, not `yolo`.
+
+- `auto`: run unattended with the agent's normal sandbox and automatic routine approvals.
+- `yolo`: only when explicitly requested; bypasses permission checks or sandboxing where the native CLI supports it.
+- `interactive`: pass no permission-mode arguments and let the agent ask normally.
+
+Pass native arguments after `--` in `herdr agent start`:
+
+| Agent kind | `auto` | `yolo` |
+| --- | --- | --- |
+| `codex` | `--sandbox workspace-write --approve-for-me` | `--dangerously-bypass-approvals-and-sandbox` |
+| `claude` | `--permission-mode auto` | `--dangerously-skip-permissions` |
+| `kimi` | `--auto` | `--yolo` |
+| `grok` | `--permission-mode auto` | `--permission-mode bypassPermissions` |
+| `pi` | unsupported (`--approve` only trusts project files) | unsupported; do not claim yolo |
+
+For any other kind, inspect its native `--help` output and establish an equivalent mode before starting. Do not silently launch an unknown kind interactively when `execution: auto` was requested. If a kind has no native autonomous mode, report that limitation and ask whether to continue interactively.
 
 ## Route selection
 
@@ -60,10 +82,10 @@ Read and follow the `herdr` skill before issuing Herdr commands. Stop if `HERDR_
 2. Confirm the selected kind with the installed Herdr CLI when needed, then start a uniquely named agent in the returned root pane:
 
    ```bash
-   herdr agent start <agent-name> --kind <agent-kind> --pane <root-pane-id>
+   herdr agent start <agent-name> --kind <agent-kind> --pane <root-pane-id> -- <native-mode-args>
    ```
 
-   Pass native agent arguments only after `--`. Keep user focus unchanged unless requested.
+   Use the execution-mode mapping above; omit the final `-- ...` for `interactive`. Keep user focus unchanged unless requested.
 
 3. Send one complete prompt through the agent surface. Use `--wait --timeout 600000` when `wait: true`; otherwise submit without `--wait` and return the started status.
 
@@ -117,6 +139,7 @@ Planning task:
 /herdr-dispatch
 agent: codex
 mode: plan
+execution: auto
 permissions: artifact-only
 artifact: PLAN.md
 task: Analyze the current authentication flow and propose the smallest implementation plan for refresh-token rotation. Do not modify source files or git state.
@@ -128,6 +151,7 @@ Visual build:
 /herdr-dispatch
 agent: kimi
 mode: build
+execution: auto
 permissions: source-edit
 artifact: RESULT.md
 task: Rework the settings page into a polished responsive interface. Preserve existing behavior, run the app, verify desktop and mobile layouts, and document the changed files and checks in RESULT.md.
@@ -139,6 +163,7 @@ Auto-route:
 /herdr-dispatch
 agent: auto
 mode: review
+execution: auto
 permissions: read-only
 task: Review the current diff for correctness regressions and missing tests. Return findings with file and line references.
 ```
