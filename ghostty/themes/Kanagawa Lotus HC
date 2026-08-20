@@ -1,0 +1,29 @@
+# Kanagawa Lotus, high-contrast variant.
+# Upstream Lotus palette was tuned for dark backgrounds; on its own cream
+# background (#f2ecbc) 11 of 16 colors fall below WCAG AA 4.5:1
+# (brblue 2.70, brblack 2.93, brgreen 2.98). Each failing color is darkened
+# in linear RGB just enough to reach >=4.55:1, preserving hue.
+# (Ghostty's minimum-contrast can't do this: it snaps text to white on
+# light themes — ghostty#1524.)
+palette = 0=#1f1f28
+palette = 1=#bb3b4d
+palette = 2=#5b703f
+palette = 3=#706a3b
+palette = 4=#4d699b
+palette = 5=#9f506b
+palette = 6=#506f6a
+palette = 7=#545464
+palette = 8=#6a6962
+palette = 9=#bb3c40
+palette = 10=#557149
+palette = 11=#796744
+palette = 12=#4a6c8e
+palette = 13=#624c83
+palette = 14=#4f7067
+palette = 15=#43436c
+background = #f2ecbc
+foreground = #545464
+cursor-color = #43436c
+cursor-text = #f2ecbc
+selection-background = #545464
+selection-foreground = #f2ecbc
