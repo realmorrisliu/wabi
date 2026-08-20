@@ -1,48 +1,49 @@
 ---
 name: creative-worker
-description: "Build visual/interactive artifacts (web pages, 3D, prototypes, visual pieces) by driving a real Kimi Code CLI session in an isolated herdr worktree pane. Use for creative/visual builds the user may want to watch or jump into. Requires HERDR_ENV=1. For structured results the parent must keep reasoning about, delegate to an in-process subagent instead."
+description: "Build visual or interactive artifacts such as web pages, prototypes, or 3D pieces in an isolated Herdr worktree with Kimi; use when visual iteration is the specialist advantage and return RESULT.md. Requires HERDR_ENV=1."
 ---
 
-# Creative Worker (herdr + kimi)
+# Build visually
 
-Delegate a creative/visual build to a real Kimi Code CLI session: visible in the herdr sidebar, isolated in its own git worktree, and survivable across detach/restart. The parent (you) frames the task, kimi builds, you harvest files — never screen-scrape the pane.
+Use this skill for a substantial visual or interactive build that benefits from Kimi's visual iteration. Keep small UI edits and routine frontend changes in the parent Pi agent. Kimi builds; the parent inspects and integrates.
 
-Requires running inside herdr: `test "${HERDR_ENV:-}" = 1`. If not inside herdr, say so and stop; do not silently do the build in-process. Read the `herdr` skill for command details; this file only fixes the workflow and the contract.
+Requires `HERDR_ENV=1`. If it is not set, stop and report that Herdr is unavailable. Read the `herdr` skill for command details.
 
-## Workflow
+## Steps
 
-1. Create an isolated worktree + workspace, keeping the user's focus where it is:
+1. **Isolate.** Create a worktree without moving the user's focus:
 
    ```bash
    herdr worktree create --cwd "$PWD" --branch <short-task-slug> --no-focus
    ```
 
-   Read the worktree path and root pane ID from the JSON response (workspace + pane are created for you).
+   Read the JSON response and record the worktree path and root pane ID. Done when both values are known.
 
-2. Start kimi in that pane (name it `creative-<slug>`):
+2. **Start Kimi.** Name the workspace `creative-<slug>` and run:
 
    ```bash
    herdr agent start creative-<slug> --kind kimi --pane <pane-id>
    ```
 
-3. Hand off the task with this contract (single prompt, then wait):
+   Done when the named Kimi agent is running in the isolated worktree.
 
-   ```bash
-   herdr agent prompt creative-<slug> "<task description>
+3. **Issue one build prompt and wait.** Include the task plus this contract:
 
+   ```text
    Contract:
-   - Build everything inside your current directory (it is a dedicated git worktree).
-   - Polished, production-grade output, not generic AI aesthetics. Prefer self-contained files unless the task requires a stack.
-   - Run/verify what you build before finishing.
-   - When done, write RESULT.md here: what you built, file list, how to run it, what you verified." --wait --timeout 600000
+   - Build inside the current dedicated worktree.
+   - Produce polished, production-grade output rather than generic AI aesthetics.
+   - Prefer self-contained files unless the task requires a stack.
+   - Run and verify the result before finishing.
+   - Write RESULT.md with what was built, the file list, how to run it, and what was verified.
    ```
 
-   Creative builds are long; 10 min is a floor, not a ceiling. If the wait returns `blocked`, read `herdr agent get`/`agent read` and surface the question to the user instead of answering for kimi.
+   Use `herdr agent prompt creative-<slug> "<task and contract>" --wait --timeout 600000`. Done when the wait returns or reports `blocked`.
 
-4. Harvest. Read `<worktree>/RESULT.md` and inspect the files directly — kimi runs on the alternate screen, so pane reads lose scrollback. Report to the user: worktree path, what was built, how to run it, and the pane name (they can jump in and keep driving kimi themselves).
+4. **Harvest and review.** Read `<worktree>/RESULT.md`, inspect the generated files and diff directly, and report the worktree path plus the run and verification instructions. If Kimi is blocked, read its status and surface the question instead of guessing. Done when the parent has reviewed the artifact and knows whether to integrate it.
 
-## Boundaries
+## Rules
 
-- One worktree per task; never build in the user's checkout.
-- Do not close the workspace when done — the user may want to continue the kimi session. Clean up only on explicit request (`herdr worktree remove --workspace <id>`).
-- If kimi CLI is missing or fails to start, report it; do not substitute another agent kind without asking.
+- Keep one worktree per build and do not build in the user's checkout.
+- Do not close the workspace when done; remove it only on explicit request with `herdr worktree remove --workspace <id>`.
+- If Kimi is missing or cannot start, report the failure; do not silently substitute another agent.

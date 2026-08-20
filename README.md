@@ -10,9 +10,11 @@ On a new machine: install pi, clone this repo, run `./install.sh`. Done.
 - [ponytail](https://github.com/DietrichGebert/ponytail) — anti-over-engineering skills
 - [@gotgenes/pi-github-tools](https://www.npmjs.com/package/@gotgenes/pi-github-tools) — deterministic GitHub CI tools (`ci_find`/`ci_watch`/`ci_list` with backoff + transient retry) replacing ad-hoc `gh` polling
 - Custom extension `extensions/pr-review-threads.ts` — `pr_review_threads` tool: PR review comments with resolved/outdated state via live GraphQL (`gh pr view --comments` misses review threads)
-- Custom skills in `~/.pi/agent/skills/` — both drive real CLI agents through herdr in isolated worktree panes (visible in the sidebar, user can jump in; results harvested via a written file, never screen-scraping):
+- Custom extension `extensions/agent-router.ts` — detects Pi/Claude/Codex/Kimi/Grok through PATH, auth checks, Herdr state, cached quota probes, and capability-based routing (`agent_router`, `/agents`)
+- Custom skills in `~/.pi/agent/skills/`:
+  - `agent-routing` — keeps the main Pi agent as the default implementer and defines when/how to delegate difficult specialist subtasks
   - `planner` — read-only research & plan for complex or uncertain tasks, via Codex CLI; plan lands in PLAN.md, the parent implements
-  - `creative-worker` — creative/visual builds (web pages, 3D, prototypes) via Kimi Code CLI; results land in RESULT.md
+  - `creative-worker` — creative/visual builds (web pages, 3D, prototypes) via Kimi Code CLI in an isolated herdr worktree; results land in RESULT.md
 - Prompt templates in `~/.pi/agent/prompts/`
 - herdr official skill (`herdr --skill`, release-matched) and `herdr integration install pi`, when herdr is on PATH
 - pi themes in `~/.pi/agent/themes/` (Kanagawa pair) + a settings seed that sets only `theme` to `kanagawa-lotus/kanagawa` (pi then follows terminal light/dark; the rest of settings.json is untouched)
@@ -28,8 +30,47 @@ Prompt shortcut: `/review [--background] [scope]`.
 
 wabi doubles as the "use herdr well" layer: install.sh wires the official herdr skill and pi integration. Run pi inside herdr so agent sessions survive the laptop lid and restore after restarts.
 
+## Agent router
+
+One command handles configuration, inventory, routing, and quota:
+
+```text
+/agents
+```
+
+With no argument it opens a checkbox-style settings panel. Toggle agents with the space/enter controls and close the panel to save.
+
+Non-interactive forms:
+
+```text
+/agents status
+/agents route 重构认证模块并补测试
+/agents quota
+/agents quota probe claude [pane-id]
+/agents list
+/agents enable claude codex
+/agents disable grok
+/agents set claude,kimi
+/agents reset
+```
+
+Optional global overrides live at `~/.pi/agent/agent-router.json` (or `$PI_AGENT_ROUTER_CONFIG`):
+
+```json
+{
+  "enabledAgents": ["pi", "claude", "codex", "kimi"],
+  "minRemainingPercentage": 15,
+  "profiles": {
+    "kimi": { "tags": ["chinese", "documentation", "research"], "priority": 5 }
+  }
+}
+```
+
+The router does not start agents or dispatch code yet; it returns a recommendation and preserves unknown quota as conditional rather than pretending it is sufficient.
+
 ## Verify
 
 ```bash
+bun test tests/agent-router.test.ts
 bun check.ts
 ```

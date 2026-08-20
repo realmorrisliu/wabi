@@ -47,7 +47,7 @@ for (const name of ["config", "config.ghostty"]) {
 check("herdr config present", existsSync(join(repoRoot, "herdr/config.toml")));
 
 // --- extensions ---
-for (const file of readdirSync(join(repoRoot, "extensions")).filter((f) => f.endsWith(".ts"))) {
+for (const file of readdirSync(join(repoRoot, "extensions")).filter((f) => f.endsWith(".ts") && !f.endsWith("-core.ts"))) {
 	const src = readFileSync(join(repoRoot, "extensions", file), "utf8");
 	check(`extension ${file}: registers a tool and has default export`, src.includes("registerTool") && src.includes("export default"));
 }
