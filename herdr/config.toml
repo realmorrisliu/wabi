@@ -16,13 +16,6 @@ auto_switch = true
 dark_name = "kanagawa"
 light_name = "kanagawa-lotus"
 
-# Workaround for herdr#2792 (stable): kanagawa's active-row fill == base bg,
-# so the selected sidebar row is invisible. Fixed upstream by #2794 — remove
-# after upgrading past the stable that ships it. NOTE: applies to light mode
-# too (herdr has no per-mode overrides yet), so lotus shows a dark bar.
-[theme.custom]
-surface_dim = "#363646"
-
 # Enable Kitty graphics rendering in panes (pi image previews on Ghostty).
 [experimental]
 kitty_graphics = true
