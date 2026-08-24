@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# wabi — pi 配置发行版: subagent runtime (pi-subagents), custom skills, prompt
-# templates, pi themes, settings seed, herdr skill + pi integration + theme,
-# ghostty theme. Safe to re-run.
+# wabi — pi 配置发行版: subagent runtime, prompt templates, pi themes,
+# settings seed, herdr skill + pi integration + theme, ghostty theme.
+# Safe to re-run.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -21,31 +21,30 @@ for f in prompts/*.md; do ln -sf "$PWD/$f" "$AGENT_DIR/prompts/$(basename "$f")"
 # 3. custom extensions (PR review threads + cross-app theme selection)
 mkdir -p "$AGENT_DIR/extensions"
 for f in extensions/*.ts; do ln -sf "$PWD/$f" "$AGENT_DIR/extensions/$(basename "$f")"; done
-
-# 4. custom skills (planner + creative-worker: real CLI agents via herdr worktrees)
-for d in skills/*/; do
-	name=$(basename "$d")
-	mkdir -p "$AGENT_DIR/skills/$name"
-	ln -sf "$PWD${d#.}/SKILL.md" "$AGENT_DIR/skills/$name/SKILL.md"
+# Remove files retired from older wabi installs.
+rm -f "$AGENT_DIR/extensions/agent-router.ts" "$AGENT_DIR/extensions/agent-router-core.ts"
+for name in agent-routing creative-worker herdr-dispatch planner; do
+	rm -f "$AGENT_DIR/skills/$name/SKILL.md"
+	rmdir "$AGENT_DIR/skills/$name" 2>/dev/null || true
 done
 
-# 5. herdr (optional): release-matched official skill + pi integration
+# 4. herdr (optional): release-matched official skill + pi integration
 if command -v herdr >/dev/null 2>&1; then
 	mkdir -p "$AGENT_DIR/skills/herdr"
 	herdr --skill >"$AGENT_DIR/skills/herdr/SKILL.md"
 	herdr integration install pi >/dev/null 2>&1 || true
-	# herdr theme config (default Catppuccin pair, follows host terminal light/dark)
+	# herdr theme config (default Catppuccin pair, fixed dark)
 	mkdir -p "$HOME/.config/herdr"
 	backup_if_real "$HOME/.config/herdr/config.toml"
 	ln -sf "$PWD/herdr/config.toml" "$HOME/.config/herdr/config.toml"
 fi
 
-# 6. pi themes and the shared pair registry
+# 5. pi themes and the shared pair registry
 mkdir -p "$AGENT_DIR/themes"
 for f in themes/*.json; do ln -sf "$PWD/$f" "$AGENT_DIR/themes/$(basename "$f")"; done
 ln -sf "$PWD/theme-pairs.json" "$AGENT_DIR/theme-pairs.json"
 
-# 7. settings seed: default pair only when no theme is configured
+# 6. settings: seed the default dark pair and migrate wabi auto-pairs
 node -e '
 const fs = require("fs");
 const path = require("path");
@@ -53,11 +52,14 @@ const f = process.argv[1];
 const registry = JSON.parse(fs.readFileSync(path.join(process.cwd(), "theme-pairs.json"), "utf8"));
 const pair = registry.pairs[registry.default];
 const s = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : {};
-if (typeof s.theme !== "string" && pair) s.theme = `${pair.light.pi}/${pair.dark.pi}`;
+if (pair) {
+  const selected = Object.values(registry.pairs).find((candidate) => s.theme === `${candidate.light.pi}/${candidate.dark.pi}`);
+  if (typeof s.theme !== "string" || selected) s.theme = (selected ?? pair).dark.pi;
+}
 fs.writeFileSync(f, JSON.stringify(s, null, "\t") + "\n");
 ' "$AGENT_DIR/settings.json"
 
-# 8. ghostty (optional): selected pair, follows macOS appearance
+# 7. ghostty (optional): selected pair, fixed dark
 if [ -d /Applications/Ghostty.app ] || [ -d "$HOME/.config/ghostty" ]; then
 	mkdir -p "$HOME/.config/ghostty"
 	backup_if_real "$HOME/.config/ghostty/config"

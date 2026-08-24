@@ -26,13 +26,13 @@ const bundledRegistry = parseThemeRegistry(readFileSync(new URL("../theme-pairs.
 test("bundles the six cross-app theme pairs", () => {
 	assert.equal(bundledRegistry.default, "catppuccin");
 	assert.deepEqual(Object.keys(bundledRegistry.pairs), ["kanagawa", "catppuccin", "tokyo-night", "rose-pine", "gruvbox", "solarized"]);
-	assert.equal(piThemeValue(bundledRegistry.pairs["rose-pine"]), "rose-pine-dawn/rose-pine");
+	assert.equal(piThemeValue(bundledRegistry.pairs["rose-pine"]), "rose-pine");
 	assert.equal(bundledRegistry.pairs.gruvbox.dark.ghostty, "Gruvbox Dark");
 });
 
 test("validates and reads a theme pair registry", () => {
 	assert.equal(registry.default, "kanagawa");
-	assert.equal(piThemeValue(pair), "lotus/wave");
+	assert.equal(piThemeValue(pair), "wave");
 });
 
 test("reloads Ghostty one terminal at a time", () => {
@@ -42,9 +42,10 @@ test("reloads Ghostty one terminal at a time", () => {
 
 test("renders all three app configurations without dropping settings", () => {
 	assert.match(renderPiSettings('{"defaultModel":"test"}', pair), /"defaultModel": "test"/);
-	assert.match(renderPiSettings("{}", pair), /"theme": "lotus\/wave"/);
+	assert.match(renderPiSettings("{}", pair), /"theme": "wave"/);
 	assert.match(renderHerdrConfig("[ui]\nshow_agent_labels_on_pane_borders = true\n", pair), /\[theme\]/);
-	assert.match(renderHerdrConfig("[theme]\nname = \"old\"\n", pair), /dark_name = \"wave\"/);
-	assert.match(renderGhosttyConfig("font-size = 14\n", pair), /theme = light:Lotus,dark:Wave/);
-	assert.match(renderGhosttyConfig("theme = old\nwindow-theme = dark\n", pair), /window-theme = system/);
+	assert.match(renderHerdrConfig("[theme]\nname = \"old\"\nauto_switch = true\n", pair), /name = \"wave\"/);
+	assert.match(renderHerdrConfig("[theme]\nname = \"old\"\nauto_switch = true\n", pair), /auto_switch = false/);
+	assert.match(renderGhosttyConfig("font-size = 14\n", pair), /theme = Wave/);
+	assert.match(renderGhosttyConfig("theme = old\nwindow-theme = system\n", pair), /window-theme = dark/);
 });

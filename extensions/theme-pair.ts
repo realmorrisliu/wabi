@@ -121,7 +121,7 @@ export function themeConfigPaths(): ThemeConfigPaths {
 }
 
 export function piThemeValue(pair: ThemePair): string {
-	return `${pair.light.pi}/${pair.dark.pi}`;
+	return pair.dark.pi;
 }
 
 export function renderPiSettings(text: string, pair: ThemePair): string {
@@ -141,7 +141,7 @@ function tomlString(value: string): string {
 export function renderHerdrConfig(text: string, pair: ThemePair): string {
 	const desired: Record<string, string> = {
 		name: tomlString(pair.dark.herdr),
-		auto_switch: "true",
+		auto_switch: "false",
 		dark_name: tomlString(pair.dark.herdr),
 		light_name: tomlString(pair.light.herdr),
 	};
@@ -182,8 +182,8 @@ function setGhosttyKey(lines: string[], key: string, value: string): void {
 export function renderGhosttyConfig(text: string, pair: ThemePair): string {
 	const lines = text.replace(/\r\n/g, "\n").split("\n");
 	if (lines.at(-1) === "") lines.pop();
-	setGhosttyKey(lines, "theme", `light:${pair.light.ghostty},dark:${pair.dark.ghostty}`);
-	setGhosttyKey(lines, "window-theme", "system");
+	setGhosttyKey(lines, "theme", pair.dark.ghostty);
+	setGhosttyKey(lines, "window-theme", "dark");
 	return lines.join("\n") + "\n";
 }
 
@@ -338,7 +338,7 @@ function pairForPiTheme(registry: ThemeRegistry, theme: string | undefined): [st
 
 function listText(registry: ThemeRegistry): string {
 	return Object.entries(registry.pairs)
-		.map(([id, pair]) => `${id} · ${pair.label} · light=${pair.light.pi} · dark=${pair.dark.pi}`)
+		.map(([id, pair]) => `${id} · ${pair.label} · dark=${pair.dark.pi}`)
 		.join("\n");
 }
 
@@ -347,7 +347,6 @@ function statusText(registry: ThemeRegistry, paths: ThemeConfigPaths): string {
 	const current = pairForPiTheme(registry, piTheme);
 	const lines = [
 		`Theme pair: ${current ? `${current[0]} · ${current[1].label}` : piTheme ?? "not set"}`,
-		`Light: ${current?.[1].light.pi ?? "unknown"}`,
 		`Dark: ${current?.[1].dark.pi ?? "unknown"}`,
 		`Pi: ${paths.pi}`,
 		`Herdr: ${existsSync(paths.herdr) ? paths.herdr : "not installed"}`,
@@ -418,7 +417,7 @@ function resolvePair(registry: ThemeRegistry, value: string): [string, ThemePair
 
 export default function themePair(pi: ExtensionAPI): void {
 	pi.registerCommand("theme", {
-		description: "Select a light/dark theme pair for Pi, Herdr, and Ghostty",
+		description: "Select a dark theme pair for Pi, Herdr, and Ghostty",
 		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
 			try {
 				const registry = loadRegistry();
@@ -449,17 +448,17 @@ export default function themePair(pi: ExtensionAPI): void {
 				return;
 			}
 			if (normalizedOperation === "help") {
-				show(ctx, "/theme · choose a pair\n/theme <id> · select a pair\n/theme list\n/theme status");
+				show(ctx, "/theme · choose a dark pair\n/theme <id> · select a dark pair\n/theme list\n/theme status");
 				return;
 			}
 
 			let selected = operation ? resolvePair(registry, operation) : undefined;
 			if (!operation && !ctx.hasUI) {
-				show(ctx, `${listText(registry)}\n\nUse /theme <id> to select a pair.`);
+				show(ctx, `${listText(registry)}\n\nUse /theme <id> to select a dark pair.`);
 				return;
 			}
 			if (!operation && ctx.hasUI) {
-				const options = Object.entries(registry.pairs).map(([id, pair]) => `${id} · ${pair.label} · ${pair.light.pi}/${pair.dark.pi}`);
+				const options = Object.entries(registry.pairs).map(([id, pair]) => `${id} · ${pair.label} · ${pair.dark.pi}`);
 				const choice = await ctx.ui.select("Select theme pair", options);
 				if (!choice) return;
 				selected = Object.entries(registry.pairs)[options.indexOf(choice)];
