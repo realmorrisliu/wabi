@@ -11,10 +11,10 @@ delivery = "terminal"
 enabled = false
 
 [theme]
-name = "tokyo-night"
-auto_switch = true
-dark_name = "tokyo-night"
-light_name = "tokyo-night-day"
+name = "rose-pine"
+auto_switch = false
+dark_name = "rose-pine"
+light_name = "rose-pine-dawn"
 
 # Enable Kitty graphics rendering in panes (pi image previews on Ghostty).
 [experimental]
