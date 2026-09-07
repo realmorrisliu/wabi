@@ -1,42 +1,43 @@
 # wabi
 
-Personal pi configuration distribution — one bootstrap for a new machine, plus herdr setup. 大道至简.
+Personal Pi configuration for a **Herdr-first coding workflow**. 大道至简.
 
-On a new machine: install pi, clone this repo, run `./install.sh`. Done.
+Install Pi and Herdr, clone this repository, then run `./install.sh`.
+Requires Node.js 22.18+ and npm. GitHub tools use an authenticated `gh` CLI.
+Run Pi inside Herdr for persistent sessions and visible terminal work.
 
 ## What it installs
 
-- [pi-subagents](https://github.com/nicobailon/pi-subagents) — the subagent runtime: `subagent` tool, builtin agents, fleet view, worktree isolation, native `fallbackModels`
-- [ponytail](https://github.com/DietrichGebert/ponytail) — anti-over-engineering skills
-- [@gotgenes/pi-github-tools](https://www.npmjs.com/package/@gotgenes/pi-github-tools) — deterministic GitHub CI tools (`ci_find`/`ci_watch`/`ci_list` with backoff + transient retry) replacing ad-hoc `gh` polling
-- Custom extension `extensions/pr-review-threads.ts` — `pr_review_threads` tool: PR review comments with resolved/outdated state via live GraphQL (`gh pr view --comments` misses review threads)
-- Prompt templates in `~/.pi/agent/prompts/`
-- herdr official skill (`herdr --skill`, release-matched) and `herdr integration install pi`, when herdr is on PATH
-- shared `theme-pairs.json` registry + `/theme` command: choose one dark theme pair and update Pi, Herdr, and Ghostty together; all three stay dark regardless of system appearance
-- bundled Pi themes in `~/.pi/agent/themes/` for all six pairs; installation seeds the default dark pair when no Pi theme is configured and migrates wabi auto-pairs, preserving the rest of `settings.json`
-- herdr (`herdr/config.toml`) and Ghostty (`ghostty/config`) theme configs — default to the dark Catppuccin pair and ignore macOS appearance; Ghostty also gets Maple Mono NF CN (font cask via brew) for powerline/icon/CJK coverage; installed when herdr/Ghostty is present, existing real files are backed up to `.bak`. On macOS, Ghostty's App Support config takes precedence over `~/.config`, so install strips `theme`/`window-theme` keys there (backed up) to keep wabi's theme winning — all other keys untouched
+- A local npm Pi runtime matching `pi --version`, used by detached subagents; the existing Pi executable is preserved.
+- `pi-subagents@0.66.0` — independent reviews, focused delegation, and completion notifications. Delegate when it helps; ordinary edits need no agent pipeline.
+- `@gotgenes/pi-github-tools@5.0.0` — deterministic GitHub CI/release tools.
+- `pr_review_threads` — paginated live review state. Summaries include IDs, comment counts and links; `thread_id` retrieves the entire discussion without body truncation.
+- `/review [--background] [scope]` — independent, read-only review. Defaults to staged, unstaged and untracked changes, and returns completed findings unless background execution is requested.
+- `/simplify [scope]` — on-demand complexity review based on behavior and maintenance cost.
+- Concise engineering and Herdr workflow instructions, installed as a managed block in `~/.pi/agent/APPEND_SYSTEM.md`, preserving other instructions.
+- The installed Herdr release's official skill (`herdr --skill`) and Pi integration. Integration failures are reported as installation failures.
+- A single bundled Pi theme, **Rosé Pine dark**, plus fixed dark Herdr/Ghostty defaults. No theme selector, synchronization, or live-reload extension.
 
-## Theme pairs
+## Installation and migration
 
-Bundled pairs: **Kanagawa**, **Catppuccin**, **Tokyo Night**, **Rosé Pine**, **Gruvbox**, and **Solarized**. Pi theme attributions are in [`themes/THIRD-PARTY.md`](themes/THIRD-PARTY.md).
+The installer honors `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME`. Prompts, the review extension/helper, and the Pi theme link to this checkout; keep it in place.
 
-```text
-/theme              # choose interactively
-/theme kanagawa     # select directly
-/theme catppuccin
-/theme list
-/theme status
-```
+Existing independent Herdr/Ghostty configs and custom Pi themes are preserved. New app configs are seeded from the repository. Former wabi app-config links become independent copies. Replaced files are backed up with `.bak.<timestamp>.<pid>` suffixes. The Ghostty template uses Maple Mono NF CN; install that font separately if desired.
 
-The selector writes the symlink targets managed by this repository, applies the selected pair's dark variant, validates Herdr/Ghostty configs, reloads Herdr, requests Ghostty's macOS config reload, and reloads Pi.
+The old theme-sync links and retired wabi skills/router links are removed only when they point to this checkout. Old wabi-managed Pi themes migrate to Rosé Pine. Ponytail's former Git package registration is removed from settings, disabling its automatic rules and bundled skills; cached package files are left alone. Its complexity-review purpose is covered by `/simplify`.
 
-## herdr
+The installer does not rewrite macOS Ghostty App Support overrides or unrelated desktop settings. If Herdr is absent, it warns and installs the Pi portion; rerun after installing Herdr.
 
-wabi doubles as the "use herdr well" layer: install.sh wires the official herdr skill and pi integration. Run pi inside herdr so agent sessions survive the laptop lid and restore after restarts.
+Restart Pi or run `/reload` after installation. Use `/subagents-doctor` to diagnose delegation in the running Pi session. Consult the installed subagent guide for current tool syntax and runtime requirements.
 
-## Verify
+## Verify and update
 
 ```bash
-bun test tests/*.test.ts
-bun check.ts
+node --experimental-strip-types --test tests/*.test.ts
+node --experimental-strip-types check.ts
+bash -n install.sh
 ```
+
+Direct package versions are pinned in `install.sh`; update them deliberately and rerun verification. Herdr's skill is refreshed from the installed binary whenever the installer runs. Local tests cover distribution checks, installation migration, and GitHub pagination; they do not substitute for live provider/delegation checks.
+
+Theme attribution: [themes/THIRD-PARTY.md](themes/THIRD-PARTY.md).

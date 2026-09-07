@@ -1,86 +1,13 @@
-// check.ts — self-check for wabi's distribution files. Run: bun check.ts
-
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
-
-const repoRoot = new URL(".", import.meta.url).pathname;
-let failures = 0;
-
-function check(name: string, ok: boolean): void {
-	if (ok) console.log(`ok   ${name}`);
-	else {
-		failures++;
-		console.error(`FAIL ${name}`);
-	}
+// Repository-only validation. Does not inspect or mutate personal app settings.
+import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
+for (const file of readdirSync(new URL('prompts/', import.meta.url))) {
+  assert.match(read(`prompts/${file}`), /^---\ndescription: .+/);
 }
-
-function parseFrontmatter(content: string): Record<string, string> {
-	const match = content.match(/^---\n([\s\S]*?)\n---\n/);
-	if (!match) return {};
-	const fields: Record<string, string> = {};
-	for (const line of match[1].split("\n")) {
-		const field = line.match(/^([a-zA-Z][\w-]*):\s*(.*)$/);
-		if (field) fields[field[1]] = field[2].trim();
-	}
-	return fields;
-}
-
-// --- prompts ---
-for (const file of readdirSync(join(repoRoot, "prompts")).filter((f) => f.endsWith(".md"))) {
-	const fm = parseFrontmatter(readFileSync(join(repoRoot, "prompts", file), "utf8"));
-	check(`prompt ${file}: has description`, !!fm.description);
-}
-
-// --- themes & app configs ---
-const bundledPiThemes = new Set<string>();
-for (const file of readdirSync(join(repoRoot, "themes")).filter((f) => f.endsWith(".json"))) {
-	const theme = JSON.parse(readFileSync(join(repoRoot, "themes", file), "utf8"));
-	check(`theme ${file}: name matches filename`, theme.name === file.replace(/\.json$/, ""));
-	if (typeof theme.name === "string") bundledPiThemes.add(theme.name);
-}
-check("ghostty config present", existsSync(join(repoRoot, "ghostty/config")));
-const themePairsPath = join(repoRoot, "theme-pairs.json");
-if (existsSync(themePairsPath)) {
-	const registry = JSON.parse(readFileSync(themePairsPath, "utf8")) as {
-		default?: string;
-		pairs?: Record<string, { light?: Record<string, unknown>; dark?: Record<string, unknown> }>;
-	};
-	check("theme pair registry has a default", typeof registry.default === "string" && !!registry.pairs?.[registry.default]);
-	for (const [id, pair] of Object.entries(registry.pairs ?? {})) {
-		for (const mode of ["light", "dark"] as const) {
-			for (const app of ["pi", "herdr", "ghostty"] as const) {
-				const target = pair[mode]?.[app];
-				check(`theme pair ${id}.${mode}.${app}`, typeof target === "string" && !!target);
-				if (app === "pi" && typeof target === "string") {
-					check(`theme pair ${id}.${mode}.pi: bundled theme`, bundledPiThemes.has(target));
-				}
-			}
-		}
-	}
-} else check("theme pair registry present", false);
-// macOS App Support ghostty config (if any) must not override wabi's theme
-for (const name of ["config", "config.ghostty"]) {
-	const f = join(process.env.HOME ?? "", "Library/Application Support/com.mitchellh.ghostty", name);
-	if (existsSync(f)) {
-		check(`ghostty ${name}: no theme/window-theme override`, !/^(theme|window-theme)\s*=/m.test(readFileSync(f, "utf8")));
-	}
-}
-check("herdr config present", existsSync(join(repoRoot, "herdr/config.toml")));
-
-// --- extensions ---
-for (const file of readdirSync(join(repoRoot, "extensions")).filter((f) => f.endsWith(".ts") && !f.endsWith("-core.ts"))) {
-	const src = readFileSync(join(repoRoot, "extensions", file), "utf8");
-	check(`extension ${file}: registers a tool/command and has default export`, (src.includes("registerTool") || src.includes("registerCommand")) && src.includes("export default"));
-}
-
-// --- skills ---
-for (const dir of readdirSync(join(repoRoot, "skills"))) {
-	const fm = parseFrontmatter(readFileSync(join(repoRoot, "skills", dir, "SKILL.md"), "utf8"));
-	check(`skill ${dir}: name/description present`, fm.name === dir && !!fm.description);
-}
-
-if (failures > 0) {
-	console.error(`\n${failures} check(s) FAILED`);
-	process.exit(1);
-}
-console.log("\nall checks passed");
+assert.equal(JSON.parse(read('themes/rose-pine.json')).name, 'rose-pine');
+assert.match(read('herdr/config.toml'), /name = "rose-pine"/);
+assert.match(read('herdr/config.toml'), /auto_switch = false/);
+assert.match(read('ghostty/config'), /^theme = Rose Pine$/m);
+assert.match(read('.pi/APPEND_SYSTEM.md'), /Herdr-first workflow/);
+console.log('Distribution checks passed');

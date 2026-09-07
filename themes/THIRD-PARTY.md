@@ -1,38 +1,6 @@
-# Bundled theme attributions
+# Bundled theme attribution
 
-The JSON files in this directory are bundled so Pi can use the same theme
-pairs offline. The original theme names and palettes are preserved.
-
-## pi-community-themes
-
-Files:
-
-- `catppuccin-latte.json`
-- `catppuccin-mocha.json`
-- `gruvbox-light-medium.json`
-- `gruvbox-dark-medium.json`
-- `solarized-light.json`
-- `solarized-dark.json`
-
-Source: <https://github.com/hasit/pi-community-themes>
-License: MIT, Copyright (c) 2026 Hasit Mistry.
-
-## pi-tokyonight
-
-Files:
-
-- `tokyonight-day.json`
-- `tokyonight.json`
-
-Source: <https://github.com/juanibiapina/pi-tokyonight>
-License: MIT, Copyright Juan Ibiapina (as declared by the package metadata).
-
-## pi-rose-pine
-
-Files:
-
-- `rose-pine-dawn.json`
-- `rose-pine.json` (upstream `rose-pine-main.json`)
+`rose-pine.json` is bundled from upstream `rose-pine-main.json`.
 
 Source: <https://github.com/zenobi-us/pi-rose-pine>
 License: MIT, Copyright (c) 2025 zenobi.us.
