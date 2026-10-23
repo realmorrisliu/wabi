@@ -17,6 +17,7 @@ Run Pi inside Herdr for persistent sessions and visible terminal work.
 - Concise engineering and Herdr workflow instructions, installed as a managed block in `~/.pi/agent/APPEND_SYSTEM.md`, preserving other instructions.
 - The installed Herdr release's official skill (`herdr --skill`) and Pi integration. Integration failures are reported as installation failures.
 - A single bundled Pi theme, **Rosé Pine dark**, plus fixed dark Herdr/Ghostty defaults. No theme selector, synchronization, or live-reload extension.
+- Default model: `deepseek/deepseek-flash`. Installation updates the model/provider while preserving unrelated settings, including thinking level and MCP extension exclusions.
 
 ## Installation and migration
 

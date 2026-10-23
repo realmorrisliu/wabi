@@ -18,10 +18,13 @@ test('migrates wabi links, preserves personal settings and is repeatable', () =>
     symlinkSync(join(repo, 'themes/catppuccin-mocha.json'), join(agent, 'themes/catppuccin-mocha.json'));
     symlinkSync(join(repo, 'herdr/config.toml'), join(config, 'herdr/config.toml'));
     writeFileSync(join(agent, 'APPEND_SYSTEM.md'), 'Personal instructions\n');
-    writeFileSync(join(agent, 'settings.json'), JSON.stringify({ theme: 'catppuccin-mocha', defaultModel: 'personal', packages: ['git:github.com/DietrichGebert/ponytail', 'npm:other'] }));
+    writeFileSync(join(agent, 'settings.json'), JSON.stringify({ theme: 'catppuccin-mocha', defaultProvider: 'openai', defaultModel: 'gpt-6-astra', defaultThinkingLevel: 'max', extensions: ['-builtin:mcp'], packages: ['git:github.com/DietrichGebert/ponytail', 'npm:other'] }));
     configure(repo, agent, config);
     const settings = JSON.parse(readFileSync(join(agent, 'settings.json'), 'utf8'));
-    assert.equal(settings.defaultModel, 'personal');
+    assert.equal(settings.defaultProvider, 'deepseek');
+    assert.equal(settings.defaultModel, 'deepseek-flash');
+    assert.equal(settings.defaultThinkingLevel, 'max');
+    assert.deepEqual(settings.extensions, ['-builtin:mcp']);
     assert.equal(settings.theme, 'rose-pine');
     assert.deepEqual(settings.packages, ['npm:other']);
     assert.equal(existsSync(join(agent, 'extensions/theme-pair.ts')), false);
@@ -43,7 +46,9 @@ test('fresh setup seeds dark defaults without overwriting later personal choices
   try {
     configure(repo, agent, config);
     const settingsPath = join(agent, 'settings.json');
-    assert.equal(JSON.parse(readFileSync(settingsPath, 'utf8')).theme, 'rose-pine');
+    assert.deepEqual(JSON.parse(readFileSync(settingsPath, 'utf8')), {
+      theme: 'rose-pine', defaultProvider: 'deepseek', defaultModel: 'deepseek-flash',
+    });
     writeFileSync(settingsPath, JSON.stringify({ theme: 'omarchy-system', packages: [{ source: 'npm:personal', skills: [] }] }));
     configure(repo, agent, config);
     const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));

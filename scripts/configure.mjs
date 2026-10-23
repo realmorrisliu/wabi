@@ -47,6 +47,8 @@ export function configure(repo, agentDir, configHome) {
   const selected = typeof settings.theme === 'string' ? settings.theme.split('/') : [];
   if (!selected.length || selected.every(name => name === 'rose-pine' || (retiredThemes.includes(name) && ownedLink(join(agentDir, 'themes', `${name}.json`), `themes/${name}.json`)))) settings.theme = 'rose-pine';
   for (const name of retiredThemes) retire(`themes/${name}.json`, join(agentDir, 'themes', `${name}.json`));
+  settings.defaultProvider = 'deepseek';
+  settings.defaultModel = 'deepseek-flash';
   const serialized = JSON.stringify(settings, null, '\t') + '\n';
   if (!existsSync(settingsPath) || readFileSync(settingsPath, 'utf8') !== serialized) {
     if (present(settingsPath)) backup(settingsPath);
