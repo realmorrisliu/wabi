@@ -25,23 +25,18 @@ export function configure(repo, agentDir, configHome) {
       writeFileSync(target, text);
     } else if (!present(target)) writeFileSync(target, readFileSync(join(repo, source)));
   };
-  for (const name of ['review', 'simplify']) link(`prompts/${name}.md`, join(agentDir, 'prompts', `${name}.md`));
+  link('prompts/review.md', join(agentDir, 'prompts', 'review.md'));
   link('lib/pr-review-threads.ts', join(agentDir, 'lib/pr-review-threads.ts'));
   link('extensions/pr-review-threads.ts', join(agentDir, 'extensions/pr-review-threads.ts'));
   link('themes/rose-pine.json', join(agentDir, 'themes/rose-pine.json'));
   for (const name of ['theme-pair', 'agent-router', 'agent-router-core']) retire(`extensions/${name}.ts`, join(agentDir, 'extensions', `${name}.ts`));
   retire('theme-pairs.json', join(agentDir, 'theme-pairs.json'));
+  retire('prompts/simplify.md', join(agentDir, 'prompts', 'simplify.md'));
   for (const name of ['agent-routing', 'creative-worker', 'herdr-dispatch', 'planner']) retire(`skills/${name}/SKILL.md`, join(agentDir, 'skills', name, 'SKILL.md'));
 
   const settingsPath = join(agentDir, 'settings.json');
   const settings = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {};
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('Pi settings must be a JSON object');
-  // Remove only the former wabi Ponytail package. Cached files may remain;
-  // package registration is what enables its hooks and skill discovery.
-  if (Array.isArray(settings.packages)) settings.packages = settings.packages.filter(entry => {
-    const source = typeof entry === 'string' ? entry : entry?.source;
-    return typeof source !== 'string' || !/^(?:git:)?(?:https:\/\/)?github\.com\/DietrichGebert\/ponytail(?:\.git)?(?:@.*)?\/?$/.test(source);
-  });
   const retiredThemes = ['catppuccin-latte', 'catppuccin-mocha', 'gruvbox-light-medium', 'gruvbox-dark-medium', 'solarized-light', 'solarized-dark', 'tokyonight-day', 'tokyonight', 'kanagawa-lotus', 'kanagawa', 'rose-pine-dawn'];
   // Migrate only themes owned by this checkout, including the old auto pairs.
   const selected = typeof settings.theme === 'string' ? settings.theme.split('/') : [];

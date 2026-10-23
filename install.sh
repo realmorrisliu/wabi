@@ -10,6 +10,7 @@ mkdir -p "$AGENT_DIR/skills"
 
 # Direct versions are pinned. Upgrade deliberately and verify the tool contracts.
 pi install npm:pi-subagents@0.66.0
+pi install git:github.com/DietrichGebert/ponytail@09c434ab73ca43761c5d8b0c5d341926c2fba710
 pi install npm:@gotgenes/pi-github-tools@5.0.0
 # The detached subagent runner imports Pi as a package. Keep a matching local
 # runtime even when the user's pi command is a standalone binary.

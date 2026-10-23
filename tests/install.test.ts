@@ -17,6 +17,8 @@ test('migrates wabi links, preserves personal settings and is repeatable', () =>
     symlinkSync(join(repo, 'extensions/theme-pair.ts'), join(agent, 'extensions/theme-pair.ts'));
     symlinkSync(join(repo, 'themes/catppuccin-mocha.json'), join(agent, 'themes/catppuccin-mocha.json'));
     symlinkSync(join(repo, 'herdr/config.toml'), join(config, 'herdr/config.toml'));
+    mkdirSync(join(agent, 'prompts'), { recursive: true });
+    symlinkSync(join(repo, 'prompts/simplify.md'), join(agent, 'prompts/simplify.md'));
     writeFileSync(join(agent, 'APPEND_SYSTEM.md'), 'Personal instructions\n');
     writeFileSync(join(agent, 'settings.json'), JSON.stringify({ theme: 'catppuccin-mocha', defaultProvider: 'openai', defaultModel: 'gpt-6-astra', defaultThinkingLevel: 'max', extensions: ['-builtin:mcp'], packages: ['git:github.com/DietrichGebert/ponytail', 'npm:other'] }));
     configure(repo, agent, config);
@@ -26,8 +28,9 @@ test('migrates wabi links, preserves personal settings and is repeatable', () =>
     assert.equal(settings.defaultThinkingLevel, 'max');
     assert.deepEqual(settings.extensions, ['-builtin:mcp']);
     assert.equal(settings.theme, 'rose-pine');
-    assert.deepEqual(settings.packages, ['npm:other']);
+    assert.deepEqual(settings.packages, ['git:github.com/DietrichGebert/ponytail', 'npm:other']);
     assert.equal(existsSync(join(agent, 'extensions/theme-pair.ts')), false);
+    assert.equal(lstatSync(join(agent, 'prompts/simplify.md'), { throwIfNoEntry: false }), undefined);
     assert.equal(lstatSync(join(config, 'herdr/config.toml')).isSymbolicLink(), false);
     writeFileSync(join(config, 'herdr/config.toml'), 'personal config');
     const instructions = readFileSync(join(agent, 'APPEND_SYSTEM.md'), 'utf8');
