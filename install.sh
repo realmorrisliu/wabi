@@ -12,6 +12,8 @@ mkdir -p "$AGENT_DIR/skills"
 pi install npm:pi-subagents@0.66.0
 pi install git:github.com/DietrichGebert/ponytail@09c434ab73ca43761c5d8b0c5d341926c2fba710
 pi install npm:@gotgenes/pi-github-tools@5.0.0
+# Provider behind the default model; the model id does not exist without it.
+pi install npm:pi-commandcode-provider@0.7.11
 # The detached subagent runner imports Pi as a package. Keep a matching local
 # runtime even when the user's pi command is a standalone binary.
 PI_RUNTIME_VERSION=$(pi --version)

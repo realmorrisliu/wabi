@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -42,12 +42,44 @@ export function configure(repo, agentDir, configHome) {
   const selected = typeof settings.theme === 'string' ? settings.theme.split('/') : [];
   if (!selected.length || selected.every(name => name === 'rose-pine' || (retiredThemes.includes(name) && ownedLink(join(agentDir, 'themes', `${name}.json`), `themes/${name}.json`)))) settings.theme = 'rose-pine';
   for (const name of retiredThemes) retire(`themes/${name}.json`, join(agentDir, 'themes', `${name}.json`));
-  settings.defaultProvider = 'deepseek';
-  settings.defaultModel = 'deepseek-flash';
+  // Adopt the default unless the user chose a model wabi never shipped.
+  const ownedModels = [['deepseek', 'deepseek-flash'], ['commandcode', 'deepseek/deepseek-v4.1-flash']];
+  if (!settings.defaultProvider || !settings.defaultModel || ownedModels.some(([provider, model]) => settings.defaultProvider === provider && settings.defaultModel === model)) {
+    settings.defaultProvider = 'commandcode';
+    settings.defaultModel = 'deepseek/deepseek-v4.1-flash';
+  }
+  if (!settings.defaultThinkingLevel) settings.defaultThinkingLevel = 'high';
+  // `-builtin:mcp` disables every MCP server in a session while `pi mcp list` stays green.
+  if (Array.isArray(settings.extensions) && settings.extensions.includes('-builtin:mcp')) {
+    const kept = settings.extensions.filter(name => name !== '-builtin:mcp');
+    if (kept.length) settings.extensions = kept; else delete settings.extensions;
+  }
   const serialized = JSON.stringify(settings, null, '\t') + '\n';
   if (!existsSync(settingsPath) || readFileSync(settingsPath, 'utf8') !== serialized) {
     if (present(settingsPath)) backup(settingsPath);
     writeFileSync(settingsPath, serialized);
+  }
+
+  // Wire Cua Driver's MCP server when it is installed; a personal entry with that name wins.
+  const driver = (process.env.PATH ?? '').split(':').map(dir => join(dir, 'cua-driver')).find(file => { try { return accessSync(file, constants.X_OK), true; } catch { return false; } });
+  const mcpPath = join(agentDir, 'mcp.json');
+  if (driver) {
+    let mcp = { mcpServers: {} };
+    try { if (existsSync(mcpPath)) mcp = JSON.parse(readFileSync(mcpPath, 'utf8')); } catch { mcp = undefined; console.warn(`Warning: skipped Cua Driver wiring; ${mcpPath} is not valid JSON.`); }
+    if (mcp) {
+      mcp.mcpServers ??= {};
+      mcp.mcpServers['cua-driver'] ??= {
+        command: driver,
+        args: ['mcp'],
+        exposure: 'deferred',
+        description: 'Cua Driver: read and drive the local desktop (windows, screenshots, accessibility tree, clicks, typing, browser tabs).',
+      };
+      const serializedMcp = JSON.stringify(mcp, null, '\t') + '\n';
+      if (!existsSync(mcpPath) || readFileSync(mcpPath, 'utf8') !== serializedMcp) {
+        if (present(mcpPath)) backup(mcpPath);
+        writeFileSync(mcpPath, serializedMcp);
+      }
+    }
   }
 
   const instructionsPath = join(agentDir, 'APPEND_SYSTEM.md');
